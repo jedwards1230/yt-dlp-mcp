@@ -1,0 +1,71 @@
+# Tag and create a GitHub Release via the shared
+# jedwards1230/release-workflows/.github/workflows/ai-release.yml@v1 workflow.
+#
+# Called by auto-release.yml on push to main (bump_type detected from PR
+# semver labels), or invoked directly via workflow_dispatch for manual
+# releases / dry-run previews.
+#
+# template-repo has no Docker image or Helm chart, so create_release=true
+# instructs the shared workflow to publish the GitHub Release itself. Repos
+# cloned from this template that need to chain build/publish jobs between the
+# tag and the release should set create_release=false and create the release
+# in a downstream job using needs.prepare.outputs.release_body (base64).
+#
+# Template note: calls jedwards1230/release-workflows/.github/workflows/ai-release.yml@v1.
+# See that repo for docs. Copiers may fork release-workflows and update the
+# uses: path to their own fork.
+
+name: Release
+
+run-name: >-
+  Release: ${{ inputs.dry_run && 'dry-run ' || '' }}${{ inputs.bump_type }}
+
+on:
+  workflow_call:
+    inputs:
+      bump_type:
+        description: "Version bump type (patch, minor, major)"
+        required: true
+        type: string
+      dry_run:
+        description: "Dry run — compute version and preview notes without tagging or publishing"
+        required: false
+        type: boolean
+        default: false
+    secrets:
+      ANTHROPIC_API_KEY:
+        description: "Anthropic API key for AI-generated release notes. Optional — workflow falls back to GitHub's native generate_release_notes when absent."
+        required: false
+  workflow_dispatch:
+    inputs:
+      bump_type:
+        description: "Version bump type"
+        required: true
+        type: choice
+        options:
+          - patch
+          - minor
+          - major
+        default: patch
+      dry_run:
+        description: "Dry run — compute version and preview notes without tagging or publishing"
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+  pull-requests: read
+
+jobs:
+  prepare:
+    name: Tag & Release
+    uses: jedwards1230/release-workflows/.github/workflows/ai-release.yml@9a48fc8ec1985081e7337e4ae6669a2753f847ef # v1
+    with:
+      service_name: template-repo
+      service_description: "a starter scaffold for new Claude Code-friendly repos"
+      bump_type: ${{ inputs.bump_type }}
+      dry_run: ${{ inputs.dry_run }}
+      create_release: true
+    secrets:
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}

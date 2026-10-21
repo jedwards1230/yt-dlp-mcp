@@ -1,0 +1,20 @@
+{
+  "name": "template-repo",
+  "build": {
+    "dockerfile": "Dockerfile"
+  },
+  "postStartCommand": "bash .devcontainer/entrypoint.sh",
+  "customizations": {
+    "vscode": {
+      "terminal.integrated.defaultProfile.linux": "bash",
+      "extensions": [
+        // TODO: add project-specific VS Code extensions here
+        // e.g., "golang.go", "dbaeumer.vscode-eslint", "ms-python.python"
+      ]
+    }
+  },
+  "remoteEnv": {
+    // TODO: add environment variables needed in the container
+    // "MY_VAR": "${localEnv:MY_VAR}"
+  }
+}

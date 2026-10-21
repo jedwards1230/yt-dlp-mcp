@@ -1,0 +1,55 @@
+# Dependencies
+node_modules/
+vendor/
+
+# Build artifacts
+dist/
+build/
+out/
+bin/
+*.o
+*.a
+*.so
+*.dylib
+
+# Environment and secrets
+.env
+.env.*
+!.env.example
+*.key
+*.pem
+*.p12
+*.pfx
+
+# Claude Code local overrides (never commit — use settings.json for shared config)
+.claude/settings.local.json
+
+# Editor and OS
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+.idea/
+.vscode/
+*.code-workspace
+
+# Logs
+*.log
+logs/
+
+# Test coverage
+coverage/
+*.out
+*.prof
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+
+# Temporary files
+*.tmp
+*.bak
+tmp/

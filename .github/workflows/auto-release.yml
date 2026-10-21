@@ -1,0 +1,120 @@
+# Auto-release on push to main.
+#
+# Detects the bump type from the merged PR's semver labels (semver:major /
+# semver:minor / semver:patch, default patch) and triggers release.yml to
+# version, tag, and publish a GitHub Release via the shared
+# jedwards1230/release-workflows/.github/workflows/ai-release.yml@v1 workflow.
+#
+# Also supports manual workflow_dispatch with an optional dry_run preview that
+# computes the next version and AI release notes without tagging or publishing.
+#
+# Template note: releases are OPT-IN via a semver:* label on the merged PR.
+# See jedwards1230/release-workflows for documentation.
+
+name: Auto Release
+
+run-name: >-
+  ${{
+    github.event_name == 'workflow_dispatch'
+      && format('Auto Release: {0}{1}',
+           inputs.dry_run && 'dry-run ' || '',
+           inputs.bump_type)
+      || format('Auto Release: {0}', github.event.head_commit.message || github.sha)
+  }}
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      bump_type:
+        description: "Version bump type"
+        required: true
+        type: choice
+        options:
+          - patch
+          - minor
+          - major
+        default: patch
+      dry_run:
+        description: "Dry run — compute version and preview notes without tagging or publishing"
+        required: false
+        type: boolean
+        default: false
+
+concurrency:
+  group: auto-release
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+  pull-requests: read
+
+jobs:
+  detect:
+    name: Detect bump type
+    runs-on: ubuntu-latest
+    outputs:
+      bump_type: ${{ steps.bump.outputs.type }}
+      dry_run: ${{ steps.bump.outputs.dry_run }}
+    steps:
+      - name: Determine bump type
+        id: bump
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          # workflow_dispatch: use provided inputs
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "type=${{ inputs.bump_type }}" >> $GITHUB_OUTPUT
+            if [ "${{ inputs.dry_run }}" = "true" ]; then
+              echo "dry_run=true" >> $GITHUB_OUTPUT
+              echo "::notice::Dry run: previewing release with bump_type=${{ inputs.bump_type }}"
+            else
+              echo "dry_run=false" >> $GITHUB_OUTPUT
+            fi
+            exit 0
+          fi
+
+          # push event: check PR labels for semver override, default to patch.
+          # Retry only while the PR isn't indexed yet (common after fresh
+          # merges). If the PR is found but has no labels, that's an
+          # immediate "default to patch" — no point in sleeping.
+          LABELS=""
+          PR_FOUND=""
+          for attempt in 1 2 3; do
+            PR_FOUND=$(gh pr list --state merged --base main --limit 100 \
+              --json labels,mergeCommit \
+              | jq -c --arg sha "$GITHUB_SHA" \
+                '[.[] | select(.mergeCommit.oid == $sha)] | first // empty' \
+                2>/dev/null || echo "")
+            if [ -n "$PR_FOUND" ]; then
+              LABELS=$(echo "$PR_FOUND" | jq -r '.labels[]?.name // empty' 2>/dev/null || echo "")
+              break
+            fi
+            echo "Attempt ${attempt}: merged PR for ${GITHUB_SHA} not yet indexed, retrying in 5s..."
+            sleep 5
+          done
+
+          if [ -z "$PR_FOUND" ]; then
+            echo "::warning::No merged PR matched ${GITHUB_SHA} after 3 attempts — defaulting to patch"
+          fi
+          echo "Labels for commit ${GITHUB_SHA}: ${LABELS:-<none>}"
+
+          if echo "$LABELS" | grep -q 'semver:major'; then
+            echo "type=major" >> $GITHUB_OUTPUT
+          elif echo "$LABELS" | grep -q 'semver:minor'; then
+            echo "type=minor" >> $GITHUB_OUTPUT
+          else
+            echo "type=patch" >> $GITHUB_OUTPUT
+          fi
+          echo "dry_run=false" >> $GITHUB_OUTPUT
+
+  release:
+    name: Release
+    needs: [detect]
+    uses: ./.github/workflows/release.yml
+    with:
+      bump_type: ${{ needs.detect.outputs.bump_type }}
+      dry_run: ${{ needs.detect.outputs.dry_run == 'true' }}
+    secrets: inherit
