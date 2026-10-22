@@ -1,0 +1,6 @@
+# Runtime Python dependencies of the container image, pinned so Dependabot's
+# pip ecosystem proposes upgrades. yt-dlp-ejs carries the JavaScript
+# challenge solver yt-dlp runs (with Deno) for YouTube; keep it at the
+# version the pinned yt-dlp release expects.
+yt-dlp==2026.10.21
+yt-dlp-ejs==0.8.0

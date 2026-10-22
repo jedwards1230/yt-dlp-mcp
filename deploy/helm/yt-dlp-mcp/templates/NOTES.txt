@@ -1,0 +1,14 @@
+yt-dlp-mcp is running as {{ include "yt-dlp-mcp.fullname" . }} in namespace {{ .Release.Namespace }}.
+
+MCP endpoint (streamable HTTP), from inside the cluster:
+  http://{{ include "yt-dlp-mcp.fullname" . }}.{{ .Release.Namespace }}.svc:{{ .Values.service.port }}/mcp
+
+Try it locally:
+  kubectl -n {{ .Release.Namespace }} port-forward svc/{{ include "yt-dlp-mcp.fullname" . }} 8080:{{ .Values.service.port }}
+  curl http://localhost:8080/healthz
+{{- if not (include "yt-dlp-mcp.authSecretName" .) }}
+
+WARNING: no bearer token is configured, so /mcp accepts any caller that can
+reach the Service. Set auth.existingSecret (or auth.token), put an
+authenticating gateway in front, and/or enable networkPolicy.
+{{- end }}

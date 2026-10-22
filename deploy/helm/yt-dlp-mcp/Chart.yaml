@@ -1,0 +1,16 @@
+apiVersion: v2
+name: yt-dlp-mcp
+description: Read-only MCP server for video search, metadata, subtitle listings and transcripts via yt-dlp
+type: application
+# The release workflow rewrites version and appVersion on the tagged commit;
+# the values on main are not a published release.
+version: 0.1.0
+appVersion: "0.1.0"
+kubeVersion: ">=1.25.0-0"
+home: https://github.com/jedwards1230/yt-dlp-mcp
+sources:
+  - https://github.com/jedwards1230/yt-dlp-mcp
+keywords:
+  - mcp
+  - yt-dlp
+  - transcripts

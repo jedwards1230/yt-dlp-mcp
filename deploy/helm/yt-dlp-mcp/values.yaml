@@ -1,0 +1,150 @@
+# Default values for yt-dlp-mcp. Every config.* key maps onto one
+# YTDLP_MCP_* environment variable; see docs/CONTRACT.md in the repository.
+
+image:
+  repository: ghcr.io/jedwards1230/yt-dlp-mcp
+  # Empty uses the chart's appVersion.
+  tag: ""
+  pullPolicy: IfNotPresent
+
+imagePullSecrets: []
+nameOverride: ""
+fullnameOverride: ""
+
+replicaCount: 1
+
+config:
+  # Exact hostnames tools may fetch (YTDLP_MCP_ALLOWED_HOSTS). Empty keeps the
+  # server default: youtube.com, www.youtube.com, m.youtube.com,
+  # music.youtube.com, youtu.be, youtube-nocookie.com,
+  # www.youtube-nocookie.com. YouTube inputs are always fetched from
+  # www.youtube.com, so keep it listed if you override this.
+  allowedHosts: []
+  # Per-call yt-dlp timeout, Go duration (YTDLP_MCP_TIMEOUT).
+  timeout: 60s
+  # Cap on yt-dlp stdout and on a subtitle file read back, in bytes
+  # (YTDLP_MCP_MAX_OUTPUT_BYTES).
+  maxOutputBytes: 16777216
+  # Concurrent yt-dlp processes (YTDLP_MCP_MAX_CONCURRENCY). Budget roughly
+  # 400Mi of memory per slot: a YouTube call peaks near 360Mi, most of it the
+  # JavaScript runtime solving the player challenge.
+  maxConcurrency: 4
+  # debug, info, warn or error (YTDLP_MCP_LOG_LEVEL).
+  logLevel: info
+  # How long a fetched transcript is kept so paging through it costs one
+  # yt-dlp run; 0 disables (YTDLP_MCP_CACHE_TTL).
+  cacheTTL: 10m
+  # yt-dlp executable (YTDLP_MCP_YTDLP_PATH). Empty uses the one in the image.
+  ytdlpPath: ""
+
+# Optional bearer token for /mcp (YTDLP_MCP_AUTH_TOKEN). Without one, /mcp is
+# open to anything that can reach the Service: put an authenticating gateway
+# in front, enable networkPolicy below, or both. /healthz is never
+# authenticated.
+auth:
+  # Inline token; the chart stores it in a Secret. Prefer existingSecret.
+  token: ""
+  # Name of an existing Secret holding the token.
+  existingSecret: ""
+  # Key inside the Secret (existing or chart-created).
+  existingSecretKey: token
+
+# Extra container environment entries (EnvVar objects), e.g. HTTPS_PROXY.
+extraEnv: []
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 384Mi
+  limits:
+    memory: 1536Mi
+
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 65532
+  runAsGroup: 65532
+  fsGroup: 65532
+  seccompProfile:
+    type: RuntimeDefault
+
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  privileged: false
+  capabilities:
+    drop:
+      - ALL
+
+# The only writable path. Each call gets a scratch directory here, removed
+# when the call ends; subtitle files never exceed config.maxOutputBytes.
+tmp:
+  sizeLimit: 256Mi
+  # "Memory" makes it a tmpfs, which counts against the memory limit.
+  medium: ""
+
+# The server never calls the Kubernetes API.
+automountServiceAccountToken: false
+
+livenessProbe:
+  httpGet:
+    path: /healthz
+    port: http
+  initialDelaySeconds: 2
+  periodSeconds: 20
+  timeoutSeconds: 3
+readinessProbe:
+  httpGet:
+    path: /healthz
+    port: http
+  periodSeconds: 10
+  timeoutSeconds: 3
+
+# Keep above the server's 25s shutdown grace for in-flight calls.
+terminationGracePeriodSeconds: 30
+
+podAnnotations: {}
+podLabels: {}
+nodeSelector: {}
+tolerations: []
+affinity: {}
+
+service:
+  type: ClusterIP
+  port: 8080
+
+networkPolicy:
+  # Off by default. When on, the pod accepts traffic only on the http port
+  # and sends only DNS plus the internet egress below.
+  enabled: false
+  # NetworkPolicyPeer list allowed to reach the http port. Empty allows any
+  # source (still on that port only). Example:
+  #   - namespaceSelector:
+  #       matchLabels:
+  #         kubernetes.io/metadata.name: my-gateway-namespace
+  ingressFrom: []
+  egress:
+    allowDNS: true
+    # Peers serving DNS, given UDP and TCP 53.
+    dnsTo:
+      - namespaceSelector:
+          matchLabels:
+            kubernetes.io/metadata.name: kube-system
+        podSelector:
+          matchLabels:
+            k8s-app: kube-dns
+    internet:
+      enabled: true
+      # Ranges carved out of 0.0.0.0/0 so a redirect cannot reach private
+      # networks or cloud metadata. Example:
+      #   - 10.0.0.0/8
+      #   - 172.16.0.0/12
+      #   - 192.168.0.0/16
+      #   - 169.254.0.0/16
+      exceptCIDRs: []
+      # NetworkPolicyPort list; empty allows every port. Example:
+      #   - port: 443
+      #     protocol: TCP
+      ports: []
+
+# Extra Kubernetes objects rendered with the release (templated as-is).
+extraManifests: []

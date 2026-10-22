@@ -1,0 +1,7 @@
+.git
+.gitignore
+*.tgz
+*.swp
+*.bak
+*.tmp
+.DS_Store

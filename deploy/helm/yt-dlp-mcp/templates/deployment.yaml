@@ -1,0 +1,116 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "yt-dlp-mcp.fullname" . }}
+  labels:
+    {{- include "yt-dlp-mcp.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "yt-dlp-mcp.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "yt-dlp-mcp.selectorLabels" . | nindent 8 }}
+        {{- with .Values.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      annotations:
+        {{- if and .Values.auth.token (not .Values.auth.existingSecret) }}
+        checksum/auth: {{ .Values.auth.token | sha256sum }}
+        {{- end }}
+        {{- with .Values.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      automountServiceAccountToken: {{ .Values.automountServiceAccountToken }}
+      enableServiceLinks: false
+      terminationGracePeriodSeconds: {{ .Values.terminationGracePeriodSeconds }}
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.podSecurityContext }}
+      securityContext:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: yt-dlp-mcp
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          {{- with .Values.securityContext }}
+          securityContext:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          ports:
+            - name: http
+              containerPort: 8080
+              protocol: TCP
+          env:
+            - name: YTDLP_MCP_ADDR
+              value: ":8080"
+            {{- with .Values.config.allowedHosts }}
+            - name: YTDLP_MCP_ALLOWED_HOSTS
+              value: {{ join "," . | quote }}
+            {{- end }}
+            - name: YTDLP_MCP_TIMEOUT
+              value: {{ .Values.config.timeout | quote }}
+            - name: YTDLP_MCP_MAX_OUTPUT_BYTES
+              value: {{ .Values.config.maxOutputBytes | int64 | toString | quote }}
+            - name: YTDLP_MCP_MAX_CONCURRENCY
+              value: {{ .Values.config.maxConcurrency | int | toString | quote }}
+            - name: YTDLP_MCP_LOG_LEVEL
+              value: {{ .Values.config.logLevel | quote }}
+            - name: YTDLP_MCP_CACHE_TTL
+              value: {{ .Values.config.cacheTTL | quote }}
+            {{- with .Values.config.ytdlpPath }}
+            - name: YTDLP_MCP_YTDLP_PATH
+              value: {{ . | quote }}
+            {{- end }}
+            {{- with (include "yt-dlp-mcp.authSecretName" .) }}
+            - name: YTDLP_MCP_AUTH_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ . }}
+                  key: {{ $.Values.auth.existingSecretKey }}
+            {{- end }}
+            {{- with .Values.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          {{- with .Values.livenessProbe }}
+          livenessProbe:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with .Values.readinessProbe }}
+          readinessProbe:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with .Values.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir:
+            {{- with .Values.tmp.medium }}
+            medium: {{ . }}
+            {{- end }}
+            {{- with .Values.tmp.sizeLimit }}
+            sizeLimit: {{ . }}
+            {{- end }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}

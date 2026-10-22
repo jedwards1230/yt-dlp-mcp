@@ -1,0 +1,49 @@
+{{- if .Values.networkPolicy.enabled }}
+{{- $egress := .Values.networkPolicy.egress }}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "yt-dlp-mcp.fullname" . }}
+  labels:
+    {{- include "yt-dlp-mcp.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "yt-dlp-mcp.selectorLabels" . | nindent 6 }}
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    - ports:
+        - port: http
+          protocol: TCP
+      {{- with .Values.networkPolicy.ingressFrom }}
+      from:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+  egress:
+    {{- if $egress.allowDNS }}
+    - ports:
+        - port: 53
+          protocol: UDP
+        - port: 53
+          protocol: TCP
+      {{- with $egress.dnsTo }}
+      to:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+    {{- end }}
+    {{- if $egress.internet.enabled }}
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            {{- with $egress.internet.exceptCIDRs }}
+            except:
+              {{- toYaml . | nindent 14 }}
+            {{- end }}
+      {{- with $egress.internet.ports }}
+      ports:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+    {{- end }}
+{{- end }}
