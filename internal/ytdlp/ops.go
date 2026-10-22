@@ -211,19 +211,51 @@ const (
 	SourceAutomatic Source = "auto"
 )
 
-// langRe is a BCP-47-ish language tag as yt-dlp names subtitle tracks ("en",
-// "pt-BR", "zh-Hans", "en-orig"). It is deliberately narrow: --sub-langs
-// treats its value as a comma-separated list of regular expressions, so a
-// comma, a leading "-" or any regex metacharacter must never reach it.
-var langRe = regexp.MustCompile(`^[A-Za-z]{2,3}(-[A-Za-z0-9]{1,8}){0,3}$`)
+// langRe matches a subtitle track key as yt-dlp names them: a language tag
+// ("en", "pt-BR", "zh-Hans", "es-419"), an automatic "<lang>-orig", or a
+// YouTube named manual track "<lang>-<track id>" ("en-eEY6OEpapPo"), whose
+// id is base64url-like and may itself contain "-" or "_" anywhere. It is
+// narrow where it matters: --sub-langs treats its value as a comma-separated
+// list of case-insensitive regular expressions, and a leading "-" as "leave
+// this one out", so a comma, a leading "-" or any regex metacharacter must
+// never reach it. Letters, digits, "-" and "_" are literals to a regex.
+var langRe = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9_-]{1,63}$`)
 
-// ValidateLang rejects anything that is not a plain language code, including
+// ValidateLang rejects anything that is not a plain track key, including
 // "all", which --sub-langs treats as every language.
 func ValidateLang(lang string) error {
 	if !langRe.MatchString(lang) || strings.EqualFold(lang, "all") {
-		return &Error{Kind: KindInvalid, Msg: fmt.Sprintf("language %q is not a subtitle language code like \"en\", \"pt-BR\" or \"en-orig\"; call list_subtitles for the codes this video has", lang)}
+		return &Error{Kind: KindInvalid, Msg: fmt.Sprintf("language %q is not a subtitle language code like \"en\", \"pt-BR\", \"en-orig\" or \"en-eEY6OEpapPo\"; call list_subtitles for the codes this video has", lang)}
 	}
 	return nil
+}
+
+// namedSuffix is the id part of a YouTube named manual track key
+// ("eEY6OEpapPo" in "en-eEY6OEpapPo"). YouTube keys a manual track that has
+// a name as "<languageCode>-<id>" with an 11-character id. Requiring more
+// than 8 characters, the most a BCP-47 subtag has, keeps a region or script
+// ("en-GB", "zh-Hant", "es-419") from passing for one. The pattern holds no
+// comma: yt-dlp splits --sub-langs on every comma, so "{9,}" would break it.
+const namedSuffix = `[A-Za-z0-9_-]{9}[A-Za-z0-9_-]*`
+
+var namedSuffixRe = regexp.MustCompile(`^` + namedSuffix + `$`)
+
+// IsNamedTrack reports whether code is a named manual track in lang:
+// lang, "-", then a track id ("en-eEY6OEpapPo" for "en", but not "en-GB").
+func IsNamedTrack(code, lang string) bool {
+	rest, ok := strings.CutPrefix(code, lang+"-")
+	return ok && namedSuffixRe.MatchString(rest)
+}
+
+// subLangs is the --sub-langs value for a transcript in lang: lang itself
+// and, unless only automatic captions are wanted, a pattern for the named
+// manual tracks in lang, so one run fetches every candidate. lang has passed
+// ValidateLang, so it holds no regex metacharacters.
+func subLangs(lang string, src Source) string {
+	if src == SourceAutomatic {
+		return lang
+	}
+	return lang + "," + regexp.QuoteMeta(lang) + "-" + namedSuffix
 }
 
 // SubtitleFile is a downloaded subtitle track.
@@ -238,10 +270,16 @@ type SubtitleFile struct {
 	Data      []byte
 }
 
-// Transcript downloads the subtitle track lang into the call's scratch
-// directory (never the video) and returns its bytes. With SourceAny both
-// manual and automatic tracks are requested and yt-dlp keeps the manual one
-// when both exist in that language.
+// Transcript downloads a subtitle track in lang into the call's scratch
+// directory (never the video) and returns its bytes. The track is, in order:
+//
+//  1. the manual track keyed exactly lang;
+//  2. otherwise, unless src is SourceAutomatic, the first named manual track
+//     in lang ("en-eEY6OEpapPo" for "en", see IsNamedTrack), in yt-dlp's
+//     order; a region variant such as "en-GB" is not one;
+//  3. otherwise, unless src is SourceManual, the automatic track lang.
+//
+// SubtitleFile.Lang reports the key actually used.
 func (r *Runner) Transcript(ctx context.Context, target, lang string, src Source) (SubtitleFile, error) {
 	var out SubtitleFile
 	if err := ValidateLang(lang); err != nil {
@@ -272,7 +310,7 @@ func (r *Runner) Transcript(ctx context.Context, target, lang string, src Source
 			formats[i] = string(f)
 		}
 		args = append(args,
-			"--sub-langs", lang,
+			"--sub-langs", subLangs(lang, src),
 			"--sub-format", strings.Join(formats, "/"),
 			"-P", dir,
 			"-o", transcriptBase,
@@ -293,39 +331,52 @@ func (r *Runner) Transcript(ctx context.Context, target, lang string, src Source
 		out.Tracks.Manual = zipTracks(lines[1], "")
 		out.Tracks.Automatic = zipTracks(lines[2], "")
 
-		path, format, unsupported, err := findSubtitleFile(dir, lang)
-		if err != nil {
-			return err
+		manual := codes(out.Tracks.Manual)
+		var candidates []string
+		if src != SourceAutomatic && !slices.Contains(manual, lang) {
+			for _, c := range manual {
+				if IsNamedTrack(c, lang) {
+					candidates = append(candidates, c)
+				}
+			}
 		}
-		if unsupported != "" {
-			return &Error{Kind: KindParse, Msg: unsupportedMessage(lang, unsupported, src, out.Tracks)}
+		candidates = append(candidates, lang)
+		for _, code := range candidates {
+			path, format, unsupported, err := findSubtitleFile(dir, code)
+			if err != nil {
+				return err
+			}
+			if unsupported != "" {
+				return &Error{Kind: KindParse, Msg: unsupportedMessage(code, lang, unsupported, src, out.Tracks)}
+			}
+			if path == "" {
+				continue // not written: the next candidate, if any
+			}
+			st, err := os.Stat(path)
+			if err != nil {
+				return &Error{Kind: KindParse, Msg: fmt.Sprintf("reading the subtitle file: %v", err), Err: err}
+			}
+			if st.Size() > r.cfg.MaxOutputBytes {
+				return &Error{Kind: KindOutputLimit, Msg: fmt.Sprintf("the %s subtitle track is %d bytes, larger than the %d-byte limit (YTDLP_MCP_MAX_OUTPUT_BYTES)", code, st.Size(), r.cfg.MaxOutputBytes)}
+			}
+			data, err := os.ReadFile(path) // #nosec G304 -- path is inside the scratch dir this call created
+			if err != nil {
+				return &Error{Kind: KindParse, Msg: fmt.Sprintf("reading the subtitle file: %v", err), Err: err}
+			}
+			out.Lang = code
+			out.Format = format
+			out.Data = data
+			switch src {
+			case SourceManual:
+				out.Automatic = false
+			case SourceAutomatic:
+				out.Automatic = true
+			default:
+				out.Automatic = !slices.Contains(manual, code)
+			}
+			return nil
 		}
-		if path == "" {
-			return &Error{Kind: KindNoSubtitles, Msg: noSubtitlesMessage(lang, src, out.Tracks)}
-		}
-		st, err := os.Stat(path)
-		if err != nil {
-			return &Error{Kind: KindParse, Msg: fmt.Sprintf("reading the subtitle file: %v", err), Err: err}
-		}
-		if st.Size() > r.cfg.MaxOutputBytes {
-			return &Error{Kind: KindOutputLimit, Msg: fmt.Sprintf("the %s subtitle track is %d bytes, larger than the %d-byte limit (YTDLP_MCP_MAX_OUTPUT_BYTES)", lang, st.Size(), r.cfg.MaxOutputBytes)}
-		}
-		data, err := os.ReadFile(path) // #nosec G304 -- path is inside the scratch dir this call created
-		if err != nil {
-			return &Error{Kind: KindParse, Msg: fmt.Sprintf("reading the subtitle file: %v", err), Err: err}
-		}
-		out.Lang = lang
-		out.Format = format
-		out.Data = data
-		switch src {
-		case SourceManual:
-			out.Automatic = false
-		case SourceAutomatic:
-			out.Automatic = true
-		default:
-			out.Automatic = !slices.Contains(codes(out.Tracks.Manual), lang)
-		}
-		return nil
+		return &Error{Kind: KindNoSubtitles, Msg: noSubtitlesMessage(lang, src, out.Tracks)}
 	})
 	return out, err
 }
@@ -364,9 +415,9 @@ func findSubtitleFile(dir, lang string) (path string, format transcript.Format, 
 // yt-dlp picks the manual track before looking at formats; when automatic
 // captions exist in the same language the message points at source="auto"
 // instead of the server silently re-running yt-dlp for a machine track.
-func unsupportedMessage(lang, ext string, src Source, t Tracks) string {
-	msg := fmt.Sprintf("the %s track is only available as %q, which this server cannot convert (supported: json3, vtt, srt)", lang, ext)
-	if src != SourceAutomatic && slices.Contains(codes(t.Manual), lang) && slices.Contains(codes(t.Automatic), lang) {
+func unsupportedMessage(code, lang, ext string, src Source, t Tracks) string {
+	msg := fmt.Sprintf("the %s track is only available as %q, which this server cannot convert (supported: json3, vtt, srt)", code, ext)
+	if src != SourceAutomatic && slices.Contains(codes(t.Manual), code) && slices.Contains(codes(t.Automatic), lang) {
 		msg += fmt.Sprintf("; automatic captions exist in %s, so retry with source=\"auto\"", lang)
 	}
 	return msg

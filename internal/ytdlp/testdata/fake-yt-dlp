@@ -156,31 +156,55 @@ printf '%s' "$templates" | while IFS= read -r t; do
 	esac
 done
 
-copy_sub() { # kind
+copy_sub() { # kind code: the first --sub-format match, else any format
 	old_ifs=$IFS
 	IFS=/
 	for ext in $sub_format; do
-		src="$dir/subs/$1.$sub_langs.$ext"
+		src="$dir/subs/$1.$2.$ext"
 		if [ -f "$src" ]; then
 			IFS=$old_ifs
-			cp "$src" "$paths/$outtmpl.$sub_langs.$ext"
+			cp "$src" "$paths/$outtmpl.$2.$ext"
 			return 0
 		fi
 	done
 	IFS=$old_ifs
-	for src in "$dir/subs/$1.$sub_langs."*; do
+	for src in "$dir/subs/$1.$2."*; do
 		if [ -f "$src" ]; then
-			cp "$src" "$paths/$outtmpl.$sub_langs.${src##*.}"
+			cp "$src" "$paths/$outtmpl.$2.${src##*.}"
 			return 0
 		fi
 	done
 	return 1
 }
 
-if [ "$write_subs" = 1 ] && copy_sub manual; then
-	exit 0
-fi
-if [ "$write_auto" = 1 ]; then
-	copy_sub auto || true
-fi
+# --sub-langs is a comma-separated list; an element with a "[" is a pattern,
+# matched (whole, case-insensitively, like yt-dlp) against the fixture's
+# track codes. Per code, a manual track wins over an automatic one.
+codes=""
+old_ifs=$IFS
+IFS=,
+for el in $sub_langs; do
+	case "$el" in
+	*'['*)
+		for f in "$dir"/subs/*.*.*; do
+			[ -f "$f" ] || continue
+			c=${f#"$dir"/subs/*.}
+			c=${c%.*}
+			if printf '%s\n' "$c" | grep -Eiqx -- "$el"; then
+				codes="$codes $c"
+			fi
+		done
+		;;
+	*) codes="$codes $el" ;;
+	esac
+done
+IFS=$old_ifs
+for code in $codes; do
+	if [ "$write_subs" = 1 ] && copy_sub manual "$code"; then
+		continue
+	fi
+	if [ "$write_auto" = 1 ]; then
+		copy_sub auto "$code" || true
+	fi
+done
 exit 0

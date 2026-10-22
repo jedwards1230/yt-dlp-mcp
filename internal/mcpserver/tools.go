@@ -220,6 +220,7 @@ type listSubtitlesOutput struct {
 	Automatic        []trackOut `json:"automatic" jsonschema:"automatic captions; by default only the original-language track"`
 	AutomaticTotal   int        `json:"automatic_total" jsonschema:"number of automatic tracks including machine translations"`
 	AutomaticOmitted int        `json:"automatic_omitted" jsonschema:"machine-translated automatic tracks left out; set include_translations to list them"`
+	Unrequestable    []string   `json:"unrequestable,omitempty" jsonschema:"track codes the site reported that get_transcript cannot request (anything but letters, digits, - and _, or not starting with a letter); never set for YouTube"`
 	Hint             string     `json:"hint,omitempty"`
 }
 
@@ -240,20 +241,40 @@ func (s *server) listSubtitles(ctx context.Context, _ *mcp.CallToolRequest, in l
 		Manual: make([]trackOut, 0, len(tracks.Manual)), Automatic: []trackOut{},
 		AutomaticTotal: len(tracks.Automatic),
 	}
+	// Every code listed here must work as get_transcript's lang, so a code
+	// it would reject is reported apart instead (YouTube never produces one).
+	requestable := func(code string) bool {
+		if ytdlp.ValidateLang(code) != nil {
+			out.Unrequestable = append(out.Unrequestable, code)
+			return false
+		}
+		return true
+	}
 	for _, t := range tracks.Manual {
-		out.Manual = append(out.Manual, trackOut{Code: t.Code, Name: t.Name})
+		if requestable(t.Code) {
+			out.Manual = append(out.Manual, trackOut{Code: t.Code, Name: t.Name})
+		}
 	}
 	orig := tracks.OriginalAutomatic()
+	if ytdlp.ValidateLang(orig) != nil {
+		orig = ""
+	}
 	// Without an "-orig" marker (non-YouTube sites) there is no way to tell
 	// originals from translations, so everything is listed.
 	listAll := in.IncludeTranslations || orig == ""
+	omitted := 0
 	for _, t := range tracks.Automatic {
+		if !requestable(t.Code) {
+			continue
+		}
 		isOrig := t.Code == orig
 		if listAll || isOrig {
 			out.Automatic = append(out.Automatic, trackOut{Code: t.Code, Name: t.Name, Original: isOrig})
+		} else {
+			omitted++
 		}
 	}
-	out.AutomaticOmitted = out.AutomaticTotal - len(out.Automatic)
+	out.AutomaticOmitted = omitted
 	out.Hint = subtitleHint(out.Manual, info.Language, orig)
 	return nil, out, nil
 }
@@ -301,7 +322,7 @@ func preferredManual(manual []trackOut, spoken string) string {
 
 type getTranscriptInput struct {
 	URL        string `json:"url" jsonschema:"video URL (http/https on the server's allowed hosts) or a bare 11-character YouTube video id"`
-	Lang       string `json:"lang,omitempty" jsonschema:"subtitle language code from list_subtitles, e.g. en, pt-BR, en-orig"`
+	Lang       string `json:"lang,omitempty" jsonschema:"subtitle language code from list_subtitles, e.g. en, pt-BR, en-orig, en-eEY6OEpapPo"`
 	Source     string `json:"source,omitempty" jsonschema:"any (manual track if present, else automatic captions), manual, or auto"`
 	Timestamps bool   `json:"timestamps,omitempty" jsonschema:"prefix each line with its start time as [mm:ss] or [hh:mm:ss]"`
 	Offset     int    `json:"offset,omitempty" jsonschema:"index of the first segment to return; pass next_offset from the previous page"`
@@ -312,7 +333,7 @@ type getTranscriptOutput struct {
 	VideoID        string `json:"video_id"`
 	Title          string `json:"title"`
 	URL            string `json:"url"`
-	Lang           string `json:"lang"`
+	Lang           string `json:"lang" jsonschema:"code of the track actually used: the requested lang, or <lang>-<track id> when a named manual track in that language was chosen"`
 	Source         string `json:"source" jsonschema:"manual or auto, the kind of track actually used"`
 	AutoTranslated bool   `json:"auto_translated,omitempty" jsonschema:"the automatic track is a machine translation, not the spoken language"`
 	Format         string `json:"format" jsonschema:"subtitle format converted: json3, vtt or srt"`

@@ -118,8 +118,10 @@ func New(opts Options) *mcp.Server {
 	mcp.AddTool(srv, &mcp.Tool{
 		Name: "get_transcript",
 		Description: "Fetch a video's subtitles as clean plain text: one caption line per output line, markup and inline timestamps stripped, " +
-			"automatic-caption rolling duplicates removed. Uses the manual track in `lang` when there is one and falls back to automatic " +
-			"captions, unless `source` says otherwise. Paginated by segment (caption line): check has_more and pass next_offset as offset " +
+			"automatic-caption rolling duplicates removed. Track choice for `lang`: the manual track coded exactly `lang`; else a named manual " +
+			"track in that language, which YouTube codes `<lang>-<track id>` (e.g. en-eEY6OEpapPo; a region code such as en-GB does not count); " +
+			"else the automatic captions in `lang`. `source` limits the choice to manual or automatic tracks, and the result's lang is the code " +
+			"actually used. Paginated by segment (caption line): check has_more and pass next_offset as offset " +
 			fmt.Sprintf("to continue. A page holds at most `limit` segments and at most %d bytes of text; a single longer line comes back alone.", maxPageBytes),
 		Annotations: readOnly("Get transcript"),
 		InputSchema: inputSchema[getTranscriptInput](

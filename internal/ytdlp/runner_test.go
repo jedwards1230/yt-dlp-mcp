@@ -4,8 +4,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math/rand/v2"
 	"os"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strconv"
 	"strings"
@@ -382,7 +384,13 @@ func TestTranscript(t *testing.T) {
 			if tt.wantNoWrite != "" && slices.Contains(args, tt.wantNoWrite) {
 				t.Errorf("argv has %s: %q", tt.wantNoWrite, args)
 			}
-			for _, pair := range [][2]string{{"--sub-langs", tt.lang}, {"--sub-format", "json3/vtt/srt"}, {"-o", "transcript"}} {
+			// Unless only automatic captions are wanted, the run also asks for
+			// named manual tracks in lang ("en-eEY6OEpapPo").
+			wantSubLangs := tt.lang + "," + tt.lang + "-[A-Za-z0-9_-]{9}[A-Za-z0-9_-]*"
+			if tt.src == SourceAutomatic {
+				wantSubLangs = tt.lang
+			}
+			for _, pair := range [][2]string{{"--sub-langs", wantSubLangs}, {"--sub-format", "json3/vtt/srt"}, {"-o", "transcript"}} {
 				if i := slices.Index(args, pair[0]); i < 0 || args[i+1] != pair[1] {
 					t.Errorf("argv %s = ?, want %q: %q", pair[0], pair[1], args)
 				}
@@ -398,6 +406,121 @@ func TestTranscript(t *testing.T) {
 				t.Errorf("scratch dir %s still exists (stat err %v)", dir, err)
 			}
 		})
+	}
+}
+
+// TestTranscriptNamedTracks pins which track a transcript comes from when
+// YouTube keys a named manual track "<lang>-<track id>": an exact manual
+// track wins, then a named one in lang (before automatic captions), while a
+// region variant such as en-GB is never taken for lang "en".
+func TestTranscriptNamedTracks(t *testing.T) {
+	const named, region, manual01 = "https://www.youtube.com/watch?v=vidNamedTrk", "https://www.youtube.com/watch?v=vidRegionGB", manualURL
+	r := newRunner(t)
+	tests := []struct {
+		name, url, lang string
+		src             Source
+		wantLang        string
+		wantAuto        bool
+		wantText        string
+	}{
+		{"named manual beats automatic", named, "en", SourceAny, "en-eEY6OEpapPo", false, "human English, named track"},
+		{"named manual with source manual", named, "en", SourceManual, "en-eEY6OEpapPo", false, "human English, named track"},
+		{"source auto skips named manual", named, "en", SourceAutomatic, "en", true, "machine english"},
+		{"named id with a leading hyphen", named, "fr", SourceAny, "fr--b_cDEFGHI", false, "français, pista nommée"},
+		{"named track requested directly", named, "es-y1SAwy5xd4g", SourceAny, "es-y1SAwy5xd4g", false, "español, pista con nombre"},
+		{"region track requested directly", named, "en-GB", SourceAny, "en-GB", false, "British English, region track"},
+		{"region is not a named track", region, "en", SourceAny, "en", true, "machine english"},
+		{"exact manual still wins", manual01, "en", SourceAny, "en", false, ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := r.Transcript(t.Context(), tt.url, tt.lang, tt.src)
+			if err != nil {
+				t.Fatalf("Transcript: %v", err)
+			}
+			if got.Lang != tt.wantLang || got.Automatic != tt.wantAuto {
+				t.Fatalf("got lang %q auto %v, want %q auto %v", got.Lang, got.Automatic, tt.wantLang, tt.wantAuto)
+			}
+			if tt.wantText != "" && !strings.Contains(string(got.Data), tt.wantText) {
+				t.Fatalf("data %q lacks %q", got.Data, tt.wantText)
+			}
+		})
+	}
+
+	_, err := r.Transcript(t.Context(), region, "en", SourceManual)
+	if e := wantKind(t, err, KindNoSubtitles); !strings.Contains(e.Msg, `no manual subtitles in language "en"; available manual: en-GB;`) {
+		t.Fatalf("message = %q", e.Msg)
+	}
+}
+
+func TestIsNamedTrack(t *testing.T) {
+	for _, tt := range []struct {
+		code, lang string
+		want       bool
+	}{
+		{"en-eEY6OEpapPo", "en", true},
+		{"en--b_cDEFGHI", "en", true},
+		{"en-GB-eEY6OEpapPo", "en", true}, // a named track in a region is still a named English track
+		{"zh-Hant-eEY6OEpapPo", "zh-Hant", true},
+		{"en-GB", "en", false},
+		{"en-orig", "en", false},
+		{"zh-Hant", "zh", false},
+		{"es-419", "es", false},
+		{"en-US-POSIX", "en", false}, // 8 characters after "en-"
+		{"en", "en", false},
+		{"fr-eEY6OEpapPo", "en", false},
+		{"english-track1", "en", false},
+		{"en-eEY6OEpa.Po", "en", false},
+	} {
+		if got := IsNamedTrack(tt.code, tt.lang); got != tt.want {
+			t.Errorf("IsNamedTrack(%q, %q) = %v, want %v", tt.code, tt.lang, got, tt.want)
+		}
+	}
+}
+
+// TestYouTubeKeysAccepted is a property test over the keys yt-dlp builds
+// for YouTube (vssId without its leading dot, "." turned into "-"): a
+// language code, "<code>-orig" for the original automatic track, and
+// "<code>-<11-character track id>" for a named manual track, the id drawn
+// from the base64url alphabet. Every such key must pass ValidateLang, and a
+// named key must be recognized as a named track of its language code and be
+// matched by the --sub-langs pattern the server sends for that code, the
+// way yt-dlp matches it (whole key, case-insensitively).
+func TestYouTubeKeysAccepted(t *testing.T) {
+	langs := []string{"en", "en-GB", "en-US", "es", "es-419", "pt-BR", "zh-Hans", "zh-Hant", "zh-TW", "fil", "iw", "yue", "sr-Latn", "ckb", "und", "de", "ja", "ar"}
+	const alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_"
+	rng := rand.New(rand.NewPCG(1, 2))
+	for _, lang := range langs {
+		for _, key := range []string{lang, lang + "-orig"} {
+			if err := ValidateLang(key); err != nil {
+				t.Errorf("ValidateLang(%q) = %v", key, err)
+			}
+			if IsNamedTrack(key, lang) {
+				t.Errorf("IsNamedTrack(%q, %q) = true", key, lang)
+			}
+		}
+		// yt-dlp splits --sub-langs on every comma before compiling each part.
+		parts := strings.Split(subLangs(lang, SourceAny), ",")
+		if len(parts) != 2 || parts[0] != lang {
+			t.Fatalf("--sub-langs for %q splits into %q, want [lang, pattern]", lang, parts)
+		}
+		pattern := regexp.MustCompile(`(?i)^(?:` + parts[1] + `)$`)
+		for range 500 {
+			id := make([]byte, 11)
+			for i := range id {
+				id[i] = alphabet[rng.IntN(len(alphabet))]
+			}
+			key := lang + "-" + string(id)
+			if err := ValidateLang(key); err != nil {
+				t.Fatalf("ValidateLang(%q) = %v", key, err)
+			}
+			if !IsNamedTrack(key, lang) || !pattern.MatchString(key) {
+				t.Fatalf("named key %q: IsNamedTrack %v, pattern match %v", key, IsNamedTrack(key, lang), pattern.MatchString(key))
+			}
+		}
+		if pattern.MatchString(lang+"-orig") || pattern.MatchString(lang+"-GB") {
+			t.Errorf("named-track pattern for %q matches a non-named key", lang)
+		}
 	}
 }
 
@@ -448,12 +571,22 @@ func TestSummarizeAutomaticCaps(t *testing.T) {
 }
 
 func TestValidateLang(t *testing.T) {
-	for _, ok := range []string{"en", "pt-BR", "zh-Hans", "en-orig", "es-419", "fil", "sr-Latn-RS"} {
+	for _, ok := range []string{
+		"en", "pt-BR", "zh-Hans", "en-orig", "es-419", "fil", "sr-Latn-RS",
+		// YouTube named manual tracks: <languageCode>-<track id>, where the
+		// id may hold "-" or "_" anywhere.
+		"en-eEY6OEpapPo", "es-y1SAwy5xd4g", "zh-Hant-eEY6OEpapPo", "en--b_cDEFGHI", "en-abcdefghij-", "en-ab__cd--efg",
+		"live_chat", "en_US", "a-b-c-d-e",
+	} {
 		if err := ValidateLang(ok); err != nil {
 			t.Errorf("ValidateLang(%q) = %v", ok, err)
 		}
 	}
-	for _, bad := range []string{"", "e", "-en", "en,fr", "all", "en.*", ".*", "en$", "en orig", "en_US", "1en", "en-", "a-b-c-d-e"} {
+	for _, bad := range []string{
+		"", "e", "-en", "-live_chat", "_en", "1en", "en,fr", "en,all", "all", "ALL", "All",
+		"en.*", ".*", "en$", "^en", "en|fr", "(en)", "[en]", "en+", "en?", "en{2}", `en\d`,
+		"en orig", "en\n", "énglish", "--exec=id", strings.Repeat("a", 65),
+	} {
 		if err := ValidateLang(bad); err == nil {
 			t.Errorf("ValidateLang(%q) accepted", bad)
 		}

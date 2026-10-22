@@ -3,9 +3,11 @@ package mcpserver
 import (
 	"context"
 	"encoding/json"
+	"math/rand/v2"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strings"
 	"sync/atomic"
@@ -390,6 +392,116 @@ func TestGetTranscriptErrors(t *testing.T) {
 				t.Fatalf("error = %q, want containing %q", msg, tt.want)
 			}
 		})
+	}
+}
+
+// TestNamedTracksEndToEnd drives a video whose manual tracks YouTube codes
+// "<lang>-<track id>" (en-eEY6OEpapPo) through a real client: every code
+// list_subtitles lists, and the code its hint suggests, works as
+// get_transcript's lang, and the default call (lang en) returns the named
+// English manual track rather than automatic captions.
+func TestNamedTracksEndToEnd(t *testing.T) {
+	f := newFixture(t, "")
+	subs := call[listSubtitlesOutput](t, f, "list_subtitles", map[string]any{"url": "vidNamedTrk", "include_translations": true})
+	if len(subs.Manual) != 4 || len(subs.Automatic) != 4 || subs.Unrequestable != nil {
+		t.Fatalf("list_subtitles = %+v", subs)
+	}
+	if !strings.Contains(subs.Hint, `get_transcript lang="en-eEY6OEpapPo" returns the manual track`) {
+		t.Fatalf("hint = %q", subs.Hint)
+	}
+	for source, tracks := range map[string][]trackOut{"manual": subs.Manual, "auto": subs.Automatic} {
+		for _, tr := range tracks {
+			out := call[getTranscriptOutput](t, f, "get_transcript", map[string]any{"url": "vidNamedTrk", "lang": tr.Code, "source": source})
+			if out.Lang != tr.Code || out.Source != source || out.Text == "" {
+				t.Errorf("get_transcript lang=%q source=%s = %+v", tr.Code, source, out)
+			}
+		}
+	}
+	def := call[getTranscriptOutput](t, f, "get_transcript", map[string]any{"url": "vidNamedTrk"})
+	if def.Lang != "en-eEY6OEpapPo" || def.Source != "manual" || def.Text != "human English, named track" {
+		t.Fatalf("default get_transcript = %+v", def)
+	}
+	region := call[getTranscriptOutput](t, f, "get_transcript", map[string]any{"url": "vidRegionGB"})
+	if region.Lang != "en" || region.Source != "auto" {
+		t.Fatalf("a region track was taken for lang en: %+v", region)
+	}
+}
+
+// tracksBackend serves fixed subtitle tracks to list_subtitles.
+type tracksBackend struct {
+	stubBackend
+	tracks ytdlp.Tracks
+}
+
+func (b *tracksBackend) Subtitles(context.Context, string) (ytdlp.VideoInfo, ytdlp.Tracks, error) {
+	return ytdlp.VideoInfo{ID: "x", Language: "en"}, b.tracks, nil
+}
+
+var hintLangRe = regexp.MustCompile(`lang="([^"]*)"`)
+
+// TestListSubtitlesCodesRequestable is a property test: for random track
+// codes, well-formed or not, every code list_subtitles lists and every code
+// its hint suggests passes ytdlp.ValidateLang, so get_transcript accepts it;
+// the rest are reported under unrequestable and nothing is lost.
+func TestListSubtitlesCodesRequestable(t *testing.T) {
+	const alphabet = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_-_ .,()*+?$|é"
+	rng := rand.New(rand.NewPCG(3, 4))
+	randomCode := func() string {
+		switch rng.IntN(4) {
+		case 0: // YouTube named track
+			id := make([]byte, 11)
+			for i := range id {
+				id[i] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_"[rng.IntN(64)]
+			}
+			return []string{"en", "es", "zh-Hans", "pt-BR"}[rng.IntN(4)] + "-" + string(id)
+		case 1:
+			return []string{"en", "en-orig", "en-GB", "es-419", "fil", "all", "live_chat"}[rng.IntN(7)]
+		}
+		b := []rune{}
+		for range rng.IntN(12) {
+			b = append(b, []rune(alphabet)[rng.IntN(len([]rune(alphabet)))])
+		}
+		return string(b)
+	}
+	allow, err := urlguard.NewAllowlist(urlguard.DefaultHosts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := range 300 {
+		var tr ytdlp.Tracks
+		for range rng.IntN(6) {
+			tr.Manual = append(tr.Manual, ytdlp.Track{Code: randomCode()})
+		}
+		for range rng.IntN(8) {
+			tr.Automatic = append(tr.Automatic, ytdlp.Track{Code: randomCode()})
+		}
+		s := &server{backend: &tracksBackend{tracks: tr}, allow: allow, cache: newTranscriptCache(0, 1, 0, time.Now), log: discardLogger()}
+		for _, all := range []bool{false, true} {
+			_, out, err := s.listSubtitles(t.Context(), nil, listSubtitlesInput{URL: "dQw4w9WgXcQ", IncludeTranslations: all})
+			if err != nil {
+				t.Fatal(err)
+			}
+			var listed []string
+			for _, l := range append(slices.Clone(out.Manual), out.Automatic...) {
+				listed = append(listed, l.Code)
+			}
+			for _, m := range hintLangRe.FindAllStringSubmatch(out.Hint, -1) {
+				listed = append(listed, m[1])
+			}
+			for _, c := range listed {
+				if err := ytdlp.ValidateLang(c); err != nil {
+					t.Fatalf("case %d: list_subtitles emitted %q, which get_transcript rejects: %v (tracks %+v)", i, c, err, tr)
+				}
+			}
+			for _, c := range out.Unrequestable {
+				if ytdlp.ValidateLang(c) == nil {
+					t.Fatalf("case %d: requestable code %q reported unrequestable", i, c)
+				}
+			}
+			if got, want := len(out.Manual)+len(out.Automatic)+out.AutomaticOmitted+len(out.Unrequestable), len(tr.Manual)+len(tr.Automatic); got != want {
+				t.Fatalf("case %d: %d codes accounted for, want %d: %+v from %+v", i, got, want, out, tr)
+			}
+		}
 	}
 }
 
