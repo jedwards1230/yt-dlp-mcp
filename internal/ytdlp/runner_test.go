@@ -535,7 +535,7 @@ func TestTranscriptErrors(t *testing.T) {
 	}{
 		{"missing language", manualURL, "xx", SourceAny, KindNoSubtitles, `no subtitles in language "xx"; available manual: en, de; auto: en-orig, en, de, fr (call list_subtitles for names)`, ""},
 		{"missing manual", manualURL, "fr", SourceManual, KindNoSubtitles, `no manual subtitles in language "fr"; available manual: en, de;`, ""},
-		{"no tracks at all", "https://www.youtube.com/watch?v=vidNoSubs00", "en", SourceAny, KindNoSubtitles, "available manual: none; auto: none", ""},
+		{"no tracks at all", "https://www.youtube.com/watch?v=vidNoSubs00", "en", SourceAny, KindNoSubtitles, "available manual: none; auto: none", "warned"},
 		{"unsupported format", "https://www.youtube.com/watch?v=vidTtmlOnly", "en", SourceAny, KindParse, `the en track is only available as "ttml", which this server cannot convert (supported: json3, vtt, srt)`, "retry"},
 		{"unsupported manual with automatic alternative", "https://www.youtube.com/watch?v=vidTtmlAuto", "en", SourceAny, KindParse,
 			`the en track is only available as "ttml", which this server cannot convert (supported: json3, vtt, srt); automatic captions exist in en, so retry with source="auto"`, ""},
@@ -667,7 +667,11 @@ func TestUnavailableVideo(t *testing.T) {
 			}
 			err := op.run("https://www.youtube.com/watch?v=vidWarned00")
 			if op.name == "transcript" {
-				_ = wantKind(t, err, KindNoSubtitles) // real but caption-less
+				// Real, but YouTube withheld its captions: the warning says why.
+				e := wantKind(t, err, KindNoSubtitles)
+				if want := `no subtitles in language "en"; available manual: none; auto: none (call list_subtitles for names); yt-dlp warned: Sign in to confirm you are not a bot. This helps protect our community.`; e.Msg != want {
+					t.Fatalf("message = %q, want %q", e.Msg, want)
+				}
 			} else if err != nil {
 				t.Fatalf("a real video with warnings failed: %v", err)
 			}
@@ -713,6 +717,7 @@ func TestUnavailableReason(t *testing.T) {
 		{"id prefix removed", "WARNING: [youtube] abc123: This video has been removed\n", "This video has been removed"},
 		{"no reason", "WARNING: No video formats found!\n", fallback},
 		{"empty", "", fallback},
+		{"generic warnings only", "WARNING: Requested format is not available\n", fallback},
 		{"long reason truncated", "WARNING: [youtube] " + strings.Repeat("é", 400) + "\n", strings.Repeat("é", 300) + "…"},
 	}
 	for _, tt := range tests {

@@ -376,7 +376,7 @@ func (r *Runner) Transcript(ctx context.Context, target, lang string, src Source
 			}
 			return nil
 		}
-		return &Error{Kind: KindNoSubtitles, Msg: noSubtitlesMessage(lang, src, out.Tracks)}
+		return &Error{Kind: KindNoSubtitles, Msg: noSubtitlesMessage(lang, src, out.Tracks, stderr)}
 	})
 	return out, err
 }
@@ -423,8 +423,11 @@ func unsupportedMessage(code, lang, ext string, src Source, t Tracks) string {
 	return msg
 }
 
-// noSubtitlesMessage tells the agent what does exist.
-func noSubtitlesMessage(lang string, src Source, t Tracks) string {
+// noSubtitlesMessage tells the agent what does exist. When the video lists
+// no tracks at all and yt-dlp warned about it (YouTube asking for a bot
+// check withholds every caption), the warning is appended: "none" alone
+// would claim the video has no captions.
+func noSubtitlesMessage(lang string, src Source, t Tracks, stderr string) string {
 	kind := ""
 	switch src {
 	case SourceManual:
@@ -440,7 +443,13 @@ func noSubtitlesMessage(lang string, src Source, t Tracks) string {
 	if len(t.Automatic) > 0 {
 		auto = summarizeAutomatic(t)
 	}
-	return fmt.Sprintf("no %ssubtitles in language %q; available manual: %s; auto: %s (call list_subtitles for names)", kind, lang, manual, auto)
+	msg := fmt.Sprintf("no %ssubtitles in language %q; available manual: %s; auto: %s (call list_subtitles for names)", kind, lang, manual, auto)
+	if len(t.Manual) == 0 && len(t.Automatic) == 0 {
+		if reason := ytdlpReason(stderr, ""); reason != "" {
+			msg += "; yt-dlp warned: " + reason
+		}
+	}
+	return msg
 }
 
 // summarizeAutomatic lists the original-language track first and caps the
@@ -510,11 +519,20 @@ func decodeInfo(line string, info *VideoInfo, stderr string) error {
 	return nil
 }
 
-// unavailableReason picks yt-dlp's explanation for a video it could not
-// load: the last ERROR line, else the last extractor warning ("WARNING:
-// [youtube] This video is unavailable"), with the level, the extractor tag
-// and a leading "<id>: " removed.
+// unavailableReason is yt-dlp's explanation for a video it could not load,
+// or a generic one when stderr holds none.
 func unavailableReason(stderr, id string) string {
+	if reason := ytdlpReason(stderr, id); reason != "" {
+		return reason
+	}
+	return "yt-dlp found no title, channel or other metadata for it; it may be private, removed or never have existed"
+}
+
+// ytdlpReason picks the most telling line of yt-dlp's stderr: the last ERROR
+// line, else the last extractor warning ("WARNING: [youtube] This video is
+// unavailable"), with the level, the extractor tag and a leading "<id>: "
+// removed. It returns "" when there is neither.
+func ytdlpReason(stderr, id string) string {
 	var lastErr, lastWarn string
 	for _, l := range strings.Split(stderr, "\n") {
 		l = strings.TrimSpace(l)
@@ -538,7 +556,7 @@ func unavailableReason(stderr, id string) string {
 		msg = strings.TrimPrefix(msg, id+": ")
 	}
 	if msg = strings.TrimSpace(msg); msg == "" {
-		return "yt-dlp found no title, channel or other metadata for it; it may be private, removed or never have existed"
+		return ""
 	}
 	const maxLen = 600
 	if len(msg) > maxLen {
