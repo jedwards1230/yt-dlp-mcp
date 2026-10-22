@@ -28,7 +28,7 @@ go test -race -coverprofile=coverage.out -covermode=atomic ./...
 
 # Lint
 go vet ./... && go vet -tags live ./...
-golangci-lint run
+golangci-lint run   # also fails on any file gofmt would change
 go mod tidy && git diff --exit-code go.mod go.sum
 GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build -o /dev/null ./cmd/yt-dlp-mcp
 
@@ -48,6 +48,9 @@ grep -q 'kind: NetworkPolicy' rendered.yaml
 grep -q 'name: YTDLP_MCP_AUTH_TOKEN' rendered.yaml
 rm rendered.yaml   # local scratch file; never commit it
 
+# pre-commit
+pre-commit run --all-files --show-diff-on-failure
+
 # Docker build (CI builds linux/amd64 only, then runs the image's smoke step)
 docker buildx build --load --platform linux/amd64 --build-arg BUILD_VERSION=dev -t yt-dlp-mcp:ci .
 ```
@@ -62,14 +65,19 @@ the repository template this project started from.
 `go test ./...` never compiles the live smoke test, but both `go vet -tags live` and
 golangci-lint (`build-tags: [live]` in `.golangci.yml`) do, so it must keep building.
 
+Go code is formatted with gofmt, simplify on (`gofmt -s`). The `formatters` section of
+`.golangci.yml` enables it, so `golangci-lint run`, and with it the Lint job, fails on a
+file gofmt would change; `golangci-lint fmt` rewrites such files in place.
+
 ### Live smoke test
 
 Not part of CI: it needs Docker and network access to YouTube. It starts the built
 image hardened (read-only root, tmpfs `/tmp`, no capabilities, a random bearer token),
-completes a real MCP handshake over streamable HTTP, calls all four tools against a
-public video, and checks from the debug log that every yt-dlp run was read-only. Run it
-before merging a change to yt-dlp flags, the image, `requirements.txt`, or transcript
-conversion:
+completes a real MCP handshake over streamable HTTP, calls all four tools against
+public videos (one of them with only a named manual English track) and a video id that
+does not exist, and checks from the debug log that every yt-dlp run was read-only. Run
+it before merging a change to yt-dlp flags, the image, `requirements.txt`, or
+transcript conversion:
 
 ```bash
 docker buildx build --load -t yt-dlp-mcp:smoke .
@@ -85,6 +93,8 @@ All of its settings are optional environment variables (defined at the top of
 | `YTDLP_MCP_LIVE_URL` | unset | MCP endpoint of an already-running server, e.g. `http://localhost:8080/mcp`. No container is started, and the image and argv checks are skipped. |
 | `YTDLP_MCP_LIVE_TOKEN` | unset | That server's bearer token, if it has one. |
 | `YTDLP_MCP_LIVE_VIDEO` | a long-lived public talk | Public video id with manual English subtitles and automatic captions. |
+| `YTDLP_MCP_LIVE_NAMED` | `UF8uR6Z6KLc` | A public video whose manual English track is a named track (`en-<track id>`) with no plain `en` track. |
+| `YTDLP_MCP_LIVE_MISSING` | `aaaaaaaaaaa` | 11-character id of a video that does not exist. |
 | `YTDLP_MCP_LIVE_QUERY` | `ted talk creativity schools` | Search query. |
 
 What each part of the test proves is in [docs/TESTING.md](docs/TESTING.md).
@@ -104,7 +114,8 @@ and any affected docs in the same PR. In particular:
 
 ## Before you open a PR
 
-- Make sure all CI checks pass locally first — run the formatter, linter, and tests.
+- Make sure all CI checks pass locally first — run the formatter (`golangci-lint fmt`),
+  the linter, and the tests.
 - Run `pre-commit run --all-files` (this repo uses pre-commit hooks).
 - For changes to yt-dlp flags, the image, `requirements.txt` or transcript conversion,
   run the live smoke test.

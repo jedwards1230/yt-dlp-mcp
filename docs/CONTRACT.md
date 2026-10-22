@@ -157,7 +157,8 @@ language, else English, else the first, and the original automatic track. Enforc
 `TestListSubtitlesTool`, `TestListSubtitlesCodesRequestable` (a property test over
 random track codes), `TestNamedTracksEndToEnd`, `TestPreferredManual`
 (`internal/mcpserver/server_test.go`), `TestSubtitlesNames`
-(`internal/ytdlp/runner_test.go`).
+(`internal/ytdlp/runner_test.go`); against real YouTube, by the `named_manual_track`
+subtest of `TestLiveSmoke`.
 
 ### §5.4 `get_transcript`
 
@@ -203,7 +204,9 @@ Enforced by `TestGetTranscriptTool`, `TestGetTranscriptAutomatic`,
 (`internal/mcpserver/cache_test.go`), `TestPaginate`, `TestPaginateCountsBytes`
 (`internal/transcript/transcript_test.go`), `TestTranscript`,
 `TestTranscriptNamedTracks`, `TestIsNamedTrack`, `TestYouTubeKeysAccepted`,
-`TestValidateLang` (`internal/ytdlp/runner_test.go`); conversion per §8.
+`TestValidateLang` (`internal/ytdlp/runner_test.go`); conversion per §8. Against real
+YouTube, the `named_manual_track` subtest of `TestLiveSmoke` checks that the default
+`lang=en` picks a named manual track.
 
 ## §6 Errors
 
@@ -220,7 +223,7 @@ around them may improve, so the named tests pin the parts an agent relies on.
 | `search` without YouTube | `search uses YouTube, but www.youtube.com is not on this server's allowed host list` | `TestSearchNeedsYouTubeAllowed` |
 | bad query | `query is required`, `query is N characters; the limit is 200`, `query must not contain control characters or newlines` | `TestSearchTool` |
 | bad language | `language "…" is not a subtitle language code like "en", "pt-BR", "en-orig" or "en-eEY6OEpapPo"; call list_subtitles for the codes this video has` | `TestValidateLang`, `TestGetTranscriptErrors` |
-| video unavailable (removed, private, never existed) | `video "<id>" is unavailable: <reason>` (`the video is unavailable: …` when yt-dlp reported no id), from every URL tool. The reason is yt-dlp's last `ERROR:` line, else its last extractor warning, else `yt-dlp found no title, channel or other metadata for it; it may be private, removed or never have existed` | `TestUnavailableVideo`, `TestDecodeInfoUnavailable`, `TestUnavailableReason`, `TestUnavailableVideoTools` |
+| video unavailable (removed, private, never existed) | `video "<id>" is unavailable: <reason>` (`the video is unavailable: …` when yt-dlp reported no id), from every URL tool. The reason is yt-dlp's last `ERROR:` line, else its last extractor warning, else `yt-dlp found no title, channel or other metadata for it; it may be private, removed or never have existed` | `TestUnavailableVideo`, `TestDecodeInfoUnavailable`, `TestUnavailableReason`, `TestUnavailableVideoTools`; live: `unavailable_video` in `TestLiveSmoke` |
 | missing language | `no subtitles in language "de"; available manual: en, fr; auto: en-orig, en, … (N more) (call list_subtitles for names)` (`manual `/`automatic ` before `subtitles` when `source` is set). When the video lists no tracks at all and yt-dlp warned why (a bot check, for example), `; yt-dlp warned: <warning>` follows | `TestTranscriptErrors`, `TestSummarizeAutomaticCaps`, `TestUnavailableVideo` |
 | unsupported track format | `the en track is only available as "ttml", which this server cannot convert (supported: json3, vtt, srt)`; when that is a manual track and automatic captions exist in `lang`, `; automatic captions exist in en, so retry with source="auto"` follows | `TestTranscriptErrors`, `TestGetTranscriptErrors` |
 | page past the end | `offset N is past the end of the transcript (M segments; valid offsets are 0-(M-1))` | `TestPaginate`, `TestGetTranscriptTool` |
@@ -234,7 +237,8 @@ around them may improve, so the named tests pin the parts an agent relies on.
 
 The tests above live in `internal/urlguard/urlguard_test.go`,
 `internal/ytdlp/runner_test.go`, `internal/ytdlp/runner_unix_test.go`,
-`internal/transcript/transcript_test.go` and `internal/mcpserver/server_test.go`.
+`internal/transcript/transcript_test.go`, `internal/mcpserver/server_test.go` and, for
+the live subtest, `test/live/live_test.go`.
 
 ## §7 yt-dlp invocation
 

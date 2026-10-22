@@ -14,7 +14,7 @@ YouTube. The exact commands CI runs are in [CONTRIBUTING.md](../CONTRIBUTING.md)
 | URL guard | `internal/urlguard/urlguard_test.go` | CI `Test` | `TestResolveRejects` is the SSRF table: schemes, pseudo-URLs, userinfo, IP literals and shorthands, ports, trailing dots, percent-encoded, IDN and full-width hosts, backslashes, whitespace, playlists and channels. `TestResolveAccepts` pins each canonical form; `TestResolveCustomAllowlist` and `TestNewAllowlist` cover operator lists. |
 | yt-dlp runner, against the fake | `internal/ytdlp/runner_test.go`, `runner_unix_test.go` | CI `Test` | Argv shape and flags for every operation, no shell, the sanitized child environment, every limit (output, stderr, subtitle size, deadline, concurrency, process-group kill on abort and after every run in `TestRunKillsLeftoverChildren`), the stale scratch sweep (`TestRemoveStaleScratch`), track choice (`TestTranscriptNamedTracks`, plus the property test `TestYouTubeKeysAccepted` over generated YouTube track keys), unavailable videos (`TestUnavailableVideo`), and the error messages built from yt-dlp's output. |
 | Transcript conversion, golden files | `internal/transcript/transcript_test.go` + `testdata/` | CI `Test` | `TestGolden` renders every fixture (`manual` and `auto` json3 and VTT, plus `manual.srt`) with and without timestamps and compares it byte for byte with `testdata/*.golden`. `TestRollingAutoCaptionsDeduplicated`, `TestCleanRules` and `TestPaginate` pin the rules the goldens depend on; `TestParseCueSeparators`, `TestStartTimesClamped` and `TestPaginateCountsBytes` pin cue splitting, start-time clamping and the byte page budget. |
-| Configuration | `internal/config/config_test.go` | CI `Test` | Defaults, flag over variable precedence, every bound, all errors reported at once, no token flag. |
+| Configuration | `internal/config/config_test.go` | CI `Test` | Defaults (a `60s` timeout, a `10m` transcript cache), flag over variable precedence, malformed and out-of-range values (`TestInvalid`), all errors reported at once, no token flag. |
 | MCP over HTTP, in process | `internal/mcpserver/*_test.go` | CI `Test` | A go-sdk MCP client against the real handler on `httptest`, backed by the real runner driving the fake: `TestToolList` (names, read-only annotations, output schemas, defaults, enums), round trips for each tool, `TestSSRFRejectedBeforeExec`, `TestUnavailableVideoTools`, `TestNamedTracksEndToEnd`, the property test `TestListSubtitlesCodesRequestable`, auth (`TestBearerAuth`, `TestValidBearer`), `/healthz`, graceful shutdown, the transcript cache and its byte budget. |
 | Helm chart | `.github/workflows/ci.yml`, job `Helm chart` | CI | `helm lint --strict`; `helm template` with defaults, and with the NetworkPolicy, existing-secret auth and a host override enabled. |
 | Image | `.github/workflows/ci.yml`, job `Docker build` | CI | The image builds, runs as UID 65532 with a read-only root, a tmpfs `/tmp` and no capabilities, has the pinned yt-dlp and a Deno, and serves `/healthz`. |
@@ -100,8 +100,8 @@ goldens.
 `TestLiveSmoke` starts the image the way a hardened deployment runs it (read-only root,
 tmpfs `/tmp`, all capabilities dropped, no new privileges, a random bearer token, debug
 logging), or uses an already-running server when `YTDLP_MCP_LIVE_URL` is set. It then
-completes a real MCP handshake over streamable HTTP and runs these subtests against a
-public video with manual English subtitles and automatic captions:
+completes a real MCP handshake over streamable HTTP and runs these subtests, most of them
+against a public video with manual English subtitles and automatic captions:
 
 | Subtest | Checks |
 |---|---|
@@ -111,6 +111,8 @@ public video with manual English subtitles and automatic captions:
 | `search`, `get_info`, `list_subtitles` | real results with the documented shape; a `youtu.be` link resolves to the same video; only the original automatic track is listed by default |
 | `get_transcript_manual` | two pages via `next_offset`, the timestamped page matches the plain one line for line, defaults resolve to the manual English track |
 | `get_transcript_auto` | the original automatic track has no consecutive duplicate lines and no markup |
+| `named_manual_track` | on a second video, whose only manual English track is a named track (`en-<track id>`): every listed code, translations included, passes `ValidateLang` and none is `unrequestable`; the hint names that track; requesting it by its full code and the default `lang=en` call both return it |
+| `unavailable_video` | `get_info`, `list_subtitles` and `get_transcript` on an id that does not exist each fail with `video "<id>" is unavailable: …` |
 | `ssrf_rejected_before_exec` | disallowed hosts, an IP address, a non-default port, an IPv6 literal and a trailing dot are rejected, and yt-dlp never ran for them |
 | `argv_invariants` | every yt-dlp command line in the debug log ends with `--` and the target and carries the read-only flags |
 
@@ -130,7 +132,7 @@ of these tests breaks an invariant, not just a test.
 | 3 | Never a shell | `TestNoShell`, `TestArgvSafety`, `TestValidateLang` (`internal/ytdlp/runner_test.go`); `argv_invariants` in `TestLiveSmoke` | shell interpretation of a query or URL, a target that is not the single argument after a final `--`, a `--sub-langs` value that is a regex or `all` |
 | 4 | Bounded output | `TestOutputCapStopsProcess`, `TestStderrTailBounded`, `TestSubtitleFileCap`, `TestTimeoutCoversSlotWait`, `TestConcurrencyLimit`, `TestBusy` (`internal/ytdlp/runner_test.go`); `TestTimeoutKillsProcessGroup`, `TestRunKillsLeftoverChildren` (`internal/ytdlp/runner_unix_test.go`); `TestPaginate`, `TestPaginateCountsBytes` (`internal/transcript/transcript_test.go`); `TestGetTranscriptTool`, `TestSearchTool`, `TestDescriptionTruncation`, `TestListSubtitlesTool` (`internal/mcpserver/server_test.go`); `TestTranscriptCacheByteBudget` (`internal/mcpserver/cache_test.go`) | an uncapped buffer, a timeout that restarts after the slot wait, a JavaScript child that outlives its call (on a timeout or after yt-dlp exits), more concurrent runs than slots, an unpaginated or unclamped response, a page budget counted in characters, an unbounded transcript cache |
 | 5 | The token stays put | `TestChildEnvSanitized` (`internal/ytdlp/runner_test.go`); `TestBearerAuth`, `TestHealthz` (`internal/mcpserver/http_test.go`); `TestInvalid` (`internal/config/config_test.go`) | the token in yt-dlp's environment or a `401` body, `/healthz` behind auth, a token flag |
-| 6 | Every listed code is requestable | `TestListSubtitlesCodesRequestable`, `TestNamedTracksEndToEnd` (`internal/mcpserver/server_test.go`); `TestYouTubeKeysAccepted` (`internal/ytdlp/runner_test.go`) | a `list_subtitles` code or hint that `get_transcript` rejects, a YouTube track key `ValidateLang` refuses, a named track the `--sub-langs` pattern misses |
+| 6 | Every listed code is requestable | `TestListSubtitlesCodesRequestable`, `TestNamedTracksEndToEnd` (`internal/mcpserver/server_test.go`); `TestYouTubeKeysAccepted` (`internal/ytdlp/runner_test.go`); `named_manual_track` in `TestLiveSmoke` | a `list_subtitles` code or hint that `get_transcript` rejects, a YouTube track key `ValidateLang` refuses, a named track the `--sub-langs` pattern misses |
 
 ## Explicitly avoid
 

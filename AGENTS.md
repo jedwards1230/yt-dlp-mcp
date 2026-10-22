@@ -11,7 +11,8 @@ untrusted machinery: a host allowlist in front, a fixed flag set, hard limits be
 
 - [docs/CONTRACT.md](docs/CONTRACT.md): the external contract, each clause citing its
   enforcing test. Read it before changing behavior.
-- [docs/TESTING.md](docs/TESTING.md): test layers, the fake yt-dlp, golden files.
+- [docs/TESTING.md](docs/TESTING.md): test layers, the fake yt-dlp, golden files, and
+  the map from each invariant below to the tests that enforce it.
 - Package depth: the doc comment at the top of each package.
 
 ## Layout
@@ -35,40 +36,29 @@ go test -race ./internal/ytdlp -run TestArgvSafety
 
 ## Invariants (violations are bugs)
 
+Which tests enforce each one, and what a break would look like:
+[docs/TESTING.md](docs/TESTING.md#invariants-and-the-tests-that-enforce-them).
+
 1. **Read-only.** No tool downloads media, writes outside its per-call scratch dir, or
    takes a path. Every run carries the fixed read-only flags in `ytdlp.BaseArgs` plus
-   `--skip-download`, and that set only ever gets stricter. Tests: `TestReadOnlyFlags`,
-   `TestArgvSafety` (`internal/ytdlp/runner_test.go`); `TestToolList`
-   (`internal/mcpserver/server_test.go`).
+   `--skip-download`, and that set only ever gets stricter.
 2. **Host allowlist before exec.** Every URL argument goes through
    `urlguard.Allowlist.Resolve` before a process starts, and yt-dlp gets the rebuilt
-   URL, never the raw string. A new URL-taking tool gets a case in the test. Tests:
-   `TestSSRFRejectedBeforeExec`, `TestSearchNeedsYouTubeAllowed`
-   (`internal/mcpserver/server_test.go`); `TestResolveRejects`
-   (`internal/urlguard/urlguard_test.go`).
+   URL, never the raw string. A new URL-taking tool gets a case in
+   `TestSSRFRejectedBeforeExec`.
 3. **Never a shell.** `exec.CommandContext` with argv only. The user-derived target is
    the last argument, right after `--`; the one user value in a flag (`--sub-langs`)
-   passes `ValidateLang`. Tests: `TestNoShell`, `TestArgvSafety`, `TestValidateLang`
-   (`internal/ytdlp/runner_test.go`).
+   passes `ValidateLang`.
 4. **Bounded output.** stdout is capped and stops the run, stderr keeps a 64 KiB tail,
-   subtitle files are size-checked before reading, one deadline covers slot wait plus
-   run, the process group is SIGKILLed on abort and again after every run, a semaphore
-   caps concurrency, and responses are clamped and paginated. Tests:
-   `TestOutputCapStopsProcess`, `TestStderrTailBounded`, `TestSubtitleFileCap`,
-   `TestTimeoutCoversSlotWait`, `TestConcurrencyLimit` (`internal/ytdlp/runner_test.go`);
-   `TestTimeoutKillsProcessGroup`, `TestRunKillsLeftoverChildren`
-   (`internal/ytdlp/runner_unix_test.go`); `TestPaginate`
-   (`internal/transcript/transcript_test.go`); `TestGetTranscriptTool`
-   (`internal/mcpserver/server_test.go`).
+   subtitle files are size-checked before reading, one `YTDLP_MCP_TIMEOUT` deadline
+   covers slot wait plus run, the process group is SIGKILLed on abort and again after
+   every run, a semaphore caps concurrency, responses are clamped and paginated, and the
+   transcript cache is capped by entry count and bytes.
 5. **The token stays put.** It never reaches the yt-dlp environment or a response, it
-   cannot be passed as a flag, and `/healthz` stays unauthenticated. Tests:
-   `TestChildEnvSanitized` (`internal/ytdlp/runner_test.go`); `TestBearerAuth`,
-   `TestHealthz` (`internal/mcpserver/http_test.go`); `TestInvalid`
-   (`internal/config/config_test.go`).
+   cannot be passed as a flag, and `/healthz` stays unauthenticated.
 6. **Every listed code is requestable.** Each code `list_subtitles` returns in `manual`,
    `automatic` or `hint` passes `ValidateLang`, so `get_transcript` accepts it; any other
-   goes to `unrequestable`. Tests: `TestListSubtitlesCodesRequestable`,
-   `TestNamedTracksEndToEnd` (`internal/mcpserver/server_test.go`).
+   goes to `unrequestable`.
 
 ## Gotchas
 

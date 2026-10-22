@@ -6,7 +6,9 @@
 // every result is bounded: search is capped at 25 hits, descriptions are
 // truncated unless asked for, the automatic-caption list is compact by
 // default, and transcripts are paginated by segment with a per-page byte
-// budget. Tool errors are returned as MCP tool errors (isError results) whose
+// budget. A fetched transcript is kept for [Options.CacheTTL] in a small LRU
+// bounded by entry count and bytes, so paging through it costs one yt-dlp
+// run. Tool errors are returned as MCP tool errors (isError results) whose
 // text tells the agent what to do next.
 package mcpserver
 
