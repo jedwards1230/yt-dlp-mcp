@@ -131,36 +131,54 @@ func normalizeText(s string, markup bool) string {
 	return strings.TrimSpace(spaceRe.ReplaceAllString(s, " "))
 }
 
-// parseCues handles WebVTT and SRT: blank-line separated blocks, where a
-// block containing a "-->" timing line is a cue and everything else (the
-// WEBVTT header, NOTE/STYLE/REGION blocks, stray text) is skipped. A cue's
-// non-empty payload lines become one segment, joined with "\n".
+// parseCues handles WebVTT and SRT. A cue starts at a "-->" timing line;
+// its payload lines become one segment, joined with "\n". Lines outside a
+// cue (the WEBVTT header, NOTE/STYLE/REGION blocks, cue identifiers, stray
+// text) are skipped, and so is a cue whose start time does not parse.
+//
+// A cue ends at an empty line or at the next timing line. A whitespace-only
+// line is payload (YouTube's rolling auto-captions put one in the empty
+// "previous line" slot of a cue, and normalizing drops it), except when the
+// next timing line follows it directly or after one identifier line: then it
+// is a separator with a stray space or tab in it, and the identifier belongs
+// to the next cue. So two cues never merge and neither a timing line nor a
+// cue number leaks into caption text.
 func parseCues(data []byte) []Segment {
 	data = bytes.TrimPrefix(data, []byte("\ufeff"))
 	text := strings.ReplaceAll(string(data), "\r\n", "\n")
 	text = strings.ReplaceAll(text, "\r", "\n")
+	lines := strings.Split(text, "\n")
 
-	var segs []Segment
-	for _, block := range strings.Split(text, "\n\n") {
-		lines := strings.Split(block, "\n")
-		timing := -1
-		for i, l := range lines {
-			if strings.Contains(l, "-->") {
-				timing = i
-				break
+	isTiming := func(i int) bool { return i < len(lines) && strings.Contains(lines[i], "-->") }
+	isBlank := func(i int) bool { return i < len(lines) && strings.TrimSpace(lines[i]) == "" }
+	var (
+		segs    []Segment
+		inCue   bool
+		start   time.Duration
+		payload []string
+	)
+	flush := func() {
+		if inCue {
+			if t := normalizeLines(payload, true); t != "" {
+				segs = append(segs, Segment{Start: start, Text: t})
 			}
 		}
-		if timing < 0 {
-			continue
-		}
-		start, ok := parseTimestamp(strings.TrimSpace(strings.SplitN(lines[timing], "-->", 2)[0]))
-		if !ok {
-			continue
-		}
-		if t := normalizeLines(lines[timing+1:], true); t != "" {
-			segs = append(segs, Segment{Start: start, Text: t})
+		inCue, payload = false, payload[:0]
+	}
+	for i, line := range lines {
+		switch {
+		case line == "":
+			flush()
+		case isTiming(i):
+			flush()
+			start, inCue = parseTimestamp(strings.TrimSpace(strings.SplitN(line, "-->", 2)[0]))
+		case isBlank(i) && (isTiming(i+1) || (i+1 < len(lines) && !isBlank(i+1) && isTiming(i+2))):
+			flush()
+		case inCue:
+			payload = append(payload, line)
 		}
 	}
+	flush()
 	return segs
 }
 

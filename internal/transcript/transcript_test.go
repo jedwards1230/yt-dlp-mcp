@@ -4,6 +4,7 @@ import (
 	"flag"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -177,6 +178,58 @@ func TestPaginate(t *testing.T) {
 			}
 			if p.Text != tt.wantText || p.NextOffset != tt.wantNext || p.Returned != tt.wantReturned || p.HasMore != tt.wantMore || p.Total != len(segs) || p.Offset != tt.offset {
 				t.Fatalf("Paginate = %+v, want text %q next %d returned %d more %v", p, tt.wantText, tt.wantNext, tt.wantReturned, tt.wantMore)
+			}
+		})
+	}
+}
+
+// TestParseCueSeparators pins how VTT and SRT cues are split: any blank-
+// looking line (spaces, tabs, CR) ends a cue, as does the next timing line,
+// so two cues never merge and a timing line never leaks into caption text.
+func TestParseCueSeparators(t *testing.T) {
+	seg := func(ms int, text string) Segment {
+		return Segment{Start: time.Duration(ms) * time.Millisecond, Text: text}
+	}
+	two := []Segment{seg(1000, "first cue"), seg(3000, "second cue")}
+	tests := []struct {
+		name   string
+		format Format
+		in     string
+		want   []Segment
+	}{
+		{"vtt space-only separator", FormatVTT,
+			"WEBVTT\n\n00:00:01.000 --> 00:00:02.000\nfirst cue\n \n00:00:03.000 --> 00:00:04.000\nsecond cue\n", two},
+		{"vtt tab-only separator", FormatVTT,
+			"WEBVTT\n\n00:00:01.000 --> 00:00:02.000\nfirst cue\n\t\n00:00:03.000 --> 00:00:04.000\nsecond cue\n", two},
+		{"vtt crlf with trailing-space blank lines", FormatVTT,
+			"WEBVTT\r\n  \r\n00:00:01.000 --> 00:00:02.000\r\nfirst cue\r\n   \r\n00:00:03.000 --> 00:00:04.000\r\nsecond cue\r\n", two},
+		{"vtt no separator before the next timing line", FormatVTT,
+			"WEBVTT\n\n00:00:01.000 --> 00:00:02.000\nfirst cue\n00:00:03.000 --> 00:00:04.000\nsecond cue\n", two},
+		{"vtt cue identifiers and note skipped", FormatVTT,
+			"WEBVTT\n\nNOTE a comment\n \nintro\n00:00:01.000 --> 00:00:02.000 align:start\nfirst cue\n\t \nc2\n00:00:03.000 --> 00:00:04.000\nsecond cue", two},
+		{"vtt whitespace-only payload line is not a separator", FormatVTT,
+			"WEBVTT\n\n00:00:01.000 --> 00:00:02.000 align:start position:0%\n \nfirst cue\n\n00:00:02.500 --> 00:00:02.510\n \n \n\n00:00:03.000 --> 00:00:04.000\nsecond cue\n \n", two},
+		{"vtt multi-line cue kept together", FormatVTT,
+			"WEBVTT\n\n00:00:01.000 --> 00:00:02.000\nfirst\ncue\n \n00:00:03.000 --> 00:00:04.000\nsecond cue\n",
+			[]Segment{seg(1000, "first\ncue"), seg(3000, "second cue")}},
+		{"vtt unparsable timing skips only its cue", FormatVTT,
+			"WEBVTT\n\nxx:yy --> 00:00:02.000\nlost\n \n00:00:03.000 --> 00:00:04.000\nsecond cue\n",
+			[]Segment{seg(3000, "second cue")}},
+		{"srt space-only separator", FormatSRT,
+			"1\n00:00:01,000 --> 00:00:02,000\nfirst cue\n \n2\n00:00:03,000 --> 00:00:04,000\nsecond cue\n", two},
+		{"srt crlf with trailing-space blank lines", FormatSRT,
+			"1\r\n00:00:01,000 --> 00:00:02,000\r\nfirst cue\r\n \t \r\n2\r\n00:00:03,000 --> 00:00:04,000\r\nsecond cue\r\n \r\n", two},
+		{"srt bare cr line endings", FormatSRT,
+			"1\r00:00:01,000 --> 00:00:02,000\rfirst cue\r \r2\r00:00:03,000 --> 00:00:04,000\rsecond cue\r", two},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := Parse([]byte(tt.in), tt.format)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !slices.Equal(got, tt.want) {
+				t.Fatalf("Parse = %q, want %q", got, tt.want)
 			}
 		})
 	}
