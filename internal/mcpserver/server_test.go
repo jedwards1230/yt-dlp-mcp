@@ -251,6 +251,19 @@ func TestGetInfoErrors(t *testing.T) {
 	}
 }
 
+// TestUnavailableVideoTools checks every URL tool reports a video yt-dlp
+// could not load (exit 0 with a placeholder record, as the real binary does
+// under --ignore-no-formats-error) as an actionable error, not as a result
+// with empty fields.
+func TestUnavailableVideoTools(t *testing.T) {
+	f := newFixture(t, "")
+	for _, tool := range []string{"get_info", "list_subtitles", "get_transcript"} {
+		if msg := callErr(t, f, tool, map[string]any{"url": "vidGone0000"}); msg != `video "vidGone0000" is unavailable: This video is unavailable` {
+			t.Errorf("%s error = %q", tool, msg)
+		}
+	}
+}
+
 // TestSSRFRejectedBeforeExec drives rejected URLs through every URL-taking
 // tool and checks yt-dlp was never started.
 func TestSSRFRejectedBeforeExec(t *testing.T) {

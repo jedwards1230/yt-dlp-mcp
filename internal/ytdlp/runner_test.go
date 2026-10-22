@@ -511,6 +511,86 @@ func TestExitErrorMessage(t *testing.T) {
 	}
 }
 
+// TestUnavailableVideo mirrors the real yt-dlp under --ignore-no-formats-error
+// for a video it cannot load: exit status 0, a placeholder record with an
+// empty fulltitle and the reason as a warning. Every single-video operation
+// must turn that into an actionable error instead of empty metadata, while a
+// real video that merely drew warnings (a bot check) keeps its metadata.
+func TestUnavailableVideo(t *testing.T) {
+	r := newRunner(t)
+	ops := []struct {
+		name string
+		run  func(url string) error
+	}{
+		{"info", func(u string) error { _, _, err := r.Info(t.Context(), u); return err }},
+		{"subtitles", func(u string) error { _, _, err := r.Subtitles(t.Context(), u); return err }},
+		{"transcript", func(u string) error { _, err := r.Transcript(t.Context(), u, "en", SourceAny); return err }},
+	}
+	for _, op := range ops {
+		t.Run(op.name, func(t *testing.T) {
+			e := wantKind(t, op.run("https://www.youtube.com/watch?v=vidGone0000"), KindUnavailable)
+			if want := `video "vidGone0000" is unavailable: This video is unavailable`; e.Msg != want {
+				t.Fatalf("message = %q, want %q", e.Msg, want)
+			}
+			err := op.run("https://www.youtube.com/watch?v=vidWarned00")
+			if op.name == "transcript" {
+				_ = wantKind(t, err, KindNoSubtitles) // real but caption-less
+			} else if err != nil {
+				t.Fatalf("a real video with warnings failed: %v", err)
+			}
+		})
+	}
+}
+
+func TestDecodeInfoUnavailable(t *testing.T) {
+	tests := []struct {
+		line, wantErr string
+	}{
+		{`{"id": "x1", "title": "youtube video #x1", "fulltitle": ""}`, `video "x1" is unavailable: `},
+		{`{"id": "x1", "title": "youtube video #x1"}`, `video "x1" is unavailable: `},
+		{`{"title": "T", "fulltitle": "T", "channel": "C"}`, `the video is unavailable: `},
+		{`{"id": "x1", "title": "T", "fulltitle": "T"}`, ""},
+		{`{"id": "x1", "title": "youtube video #x1", "fulltitle": "", "channel": "C"}`, ""},
+		{`{"id": "x1", "title": "youtube video #x1", "fulltitle": "", "uploader": "U"}`, ""},
+	}
+	for _, tt := range tests {
+		var info VideoInfo
+		err := decodeInfo(tt.line, &info, "")
+		if tt.wantErr == "" {
+			if err != nil {
+				t.Errorf("decodeInfo(%s) = %v, want success", tt.line, err)
+			}
+			continue
+		}
+		if e := wantKind(t, err, KindUnavailable); !strings.HasPrefix(e.Msg, tt.wantErr) {
+			t.Errorf("decodeInfo(%s) = %q, want prefix %q", tt.line, e.Msg, tt.wantErr)
+		}
+	}
+}
+
+func TestUnavailableReason(t *testing.T) {
+	const fallback = "yt-dlp found no title, channel or other metadata for it; it may be private, removed or never have existed"
+	tests := []struct {
+		name, stderr, want string
+	}{
+		{"extractor warning", "WARNING: [youtube] This video is unavailable\nWARNING: No video formats found!\nWARNING: Requested format is not available\n", "This video is unavailable"},
+		{"last extractor warning wins", "WARNING: [youtube] No title found in player responses\nWARNING: [youtube] Video unavailable. This video is private\n", "Video unavailable. This video is private"},
+		{"error beats warnings", "WARNING: [youtube] something\nERROR: [youtube] abc123: Private video\nWARNING: [youtube] later\n", "Private video"},
+		{"untagged error", "ERROR: Unable to download webpage: timed out\n", "Unable to download webpage: timed out"},
+		{"id prefix removed", "WARNING: [youtube] abc123: This video has been removed\n", "This video has been removed"},
+		{"no reason", "WARNING: No video formats found!\n", fallback},
+		{"empty", "", fallback},
+		{"long reason truncated", "WARNING: [youtube] " + strings.Repeat("é", 400) + "\n", strings.Repeat("é", 300) + "…"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := unavailableReason(tt.stderr, "abc123"); got != tt.want {
+				t.Fatalf("unavailableReason = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestCanceled(t *testing.T) {
 	r := newRunner(t)
 	ctx, cancel := context.WithCancel(t.Context())

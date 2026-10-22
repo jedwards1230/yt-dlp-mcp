@@ -11,6 +11,10 @@
 # fakeFlood00 (floods stdout), fakeError00 (exits 1 with an ERROR line),
 # fakeNoise00 (floods stderr, then exits 1 with an ERROR line), fakeCount00
 # (records how many fakeCount00 runs overlap, then answers as vidNoSubs00).
+# An id with no fixture directory behaves like a video YouTube cannot load
+# under --ignore-no-formats-error: extractor warnings on stderr, a placeholder
+# record with an empty fulltitle, and exit status 0. A fixture's optional
+# "stderr" file is copied to stderr.
 # The fakeChild ids leave a child process behind (its pid goes to
 # FAKE_YTDLP_PID_FILE), standing in for a JavaScript runtime that outlives
 # yt-dlp: fakeChildOk (child detached from stdio, answers as vidNoSubs00),
@@ -122,8 +126,19 @@ esac
 
 dir="$videos/$id"
 if [ ! -d "$dir" ]; then
-	echo "ERROR: [youtube] $id: Video unavailable" >&2
-	exit 1
+	echo "WARNING: [youtube] This video is unavailable" >&2
+	echo "WARNING: No video formats found!" >&2
+	echo "WARNING: Requested format is not available" >&2
+	printf '%s' "$templates" | while IFS= read -r t; do
+		case "$t" in
+		'%(.{'*) printf '{"id": "%s", "title": "youtube video #%s", "fulltitle": ""}\n' "$id" "$id" ;;
+		*) echo NA ;;
+		esac
+	done
+	exit 0
+fi
+if [ -f "$dir/stderr" ]; then
+	cat "$dir/stderr" >&2
 fi
 
 line() {

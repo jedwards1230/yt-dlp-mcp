@@ -21,8 +21,8 @@ import (
 // weighs (mostly per-language caption URLs).
 const (
 	searchTemplate = "%(.{id,title,url,channel,channel_id,duration,view_count,live_status})j"
-	infoTemplate   = "%(.{id,title,channel,channel_id,channel_url,uploader,uploader_id,duration,upload_date,release_date,timestamp,description,chapters,view_count,like_count,comment_count,tags,categories,webpage_url,live_status,availability,language,age_limit})j"
-	briefTemplate  = "%(.{id,title,webpage_url,language,duration})j"
+	infoTemplate   = "%(.{id,title,fulltitle,channel,channel_id,channel_url,uploader,uploader_id,duration,upload_date,release_date,timestamp,description,chapters,view_count,like_count,comment_count,tags,categories,webpage_url,live_status,availability,language,age_limit})j"
+	briefTemplate  = "%(.{id,title,fulltitle,channel,uploader,webpage_url,language,duration})j"
 	manualKeys     = "%(subtitles)l"
 	autoKeys       = "%(automatic_captions)l"
 	// The {name,ext} pair (not {name} alone) keeps every element non-empty:
@@ -39,7 +39,9 @@ const (
 // singleVideoArgs restrict an operation to one video: a URL that also names
 // a playlist resolves to the video, a playlist-only URL on a non-YouTube host
 // yields at most its first entry, nothing is downloaded, and a video with no
-// downloadable formats still yields its metadata.
+// downloadable formats still yields its metadata. That last flag also turns
+// "this video is unavailable" into a warning with a placeholder record and a
+// zero exit; decodeInfo turns such a record back into an error.
 var singleVideoArgs = []string{
 	"--no-playlist",
 	"--playlist-items", "1",
@@ -68,7 +70,7 @@ func (r *Runner) Search(ctx context.Context, query string, limit int) ([]SearchE
 		return []string{"--flat-playlist", "--skip-download", "-O", searchTemplate}
 	}
 	target := fmt.Sprintf("ytsearch%d:%s", limit, query)
-	err := r.run(ctx, "search", build, target, func(_ string, stdout []byte) error {
+	err := r.run(ctx, "search", build, target, func(_ string, stdout []byte, _ string) error {
 		for _, line := range outputLines(stdout) {
 			if line == "" || line == "NA" {
 				continue
@@ -96,8 +98,11 @@ type Chapter struct {
 // VideoInfo is the selected metadata fields of one video. Numeric fields are
 // pointers because extractors omit them freely and zero is a real value.
 type VideoInfo struct {
-	ID           string    `json:"id"`
-	Title        string    `json:"title"`
+	ID    string `json:"id"`
+	Title string `json:"title"`
+	// FullTitle is the title the extractor found, before yt-dlp substitutes
+	// a generic "<site> video #<id>" for a missing one.
+	FullTitle    string    `json:"fulltitle"`
 	Channel      string    `json:"channel"`
 	ChannelID    string    `json:"channel_id"`
 	ChannelURL   string    `json:"channel_url"`
@@ -160,12 +165,12 @@ func (r *Runner) Info(ctx context.Context, target string) (VideoInfo, Tracks, er
 	var info VideoInfo
 	var tracks Tracks
 	templates := []string{infoTemplate, manualKeys, autoKeys}
-	err := r.run(ctx, "info", printArgs(templates), target, func(_ string, stdout []byte) error {
+	err := r.run(ctx, "info", printArgs(templates), target, func(_ string, stdout []byte, stderr string) error {
 		lines, err := expectLines(stdout, len(templates))
 		if err != nil {
 			return err
 		}
-		if err := decodeInfo(lines[0], &info); err != nil {
+		if err := decodeInfo(lines[0], &info, stderr); err != nil {
 			return err
 		}
 		tracks.Manual = zipTracks(lines[1], "")
@@ -180,12 +185,12 @@ func (r *Runner) Subtitles(ctx context.Context, target string) (VideoInfo, Track
 	var info VideoInfo
 	var tracks Tracks
 	templates := []string{briefTemplate, manualKeys, manualNames, autoKeys, autoNames}
-	err := r.run(ctx, "list_subtitles", printArgs(templates), target, func(_ string, stdout []byte) error {
+	err := r.run(ctx, "list_subtitles", printArgs(templates), target, func(_ string, stdout []byte, stderr string) error {
 		lines, err := expectLines(stdout, len(templates))
 		if err != nil {
 			return err
 		}
-		if err := decodeInfo(lines[0], &info); err != nil {
+		if err := decodeInfo(lines[0], &info, stderr); err != nil {
 			return err
 		}
 		tracks.Manual = zipTracks(lines[1], lines[2])
@@ -277,12 +282,12 @@ func (r *Runner) Transcript(ctx context.Context, target, lang string, src Source
 		}
 		return args
 	}
-	err := r.run(ctx, "get_transcript", build, target, func(dir string, stdout []byte) error {
+	err := r.run(ctx, "get_transcript", build, target, func(dir string, stdout []byte, stderr string) error {
 		lines, err := expectLines(stdout, len(templates))
 		if err != nil {
 			return err
 		}
-		if err := decodeInfo(lines[0], &out.Info); err != nil {
+		if err := decodeInfo(lines[0], &out.Info, stderr); err != nil {
 			return err
 		}
 		out.Tracks.Manual = zipTracks(lines[1], "")
@@ -431,14 +436,64 @@ func expectLines(stdout []byte, n int) ([]string, error) {
 	return lines[:n], nil
 }
 
-func decodeInfo(line string, info *VideoInfo) error {
+// decodeInfo parses the metadata line. A record with no id, or with neither
+// a title of the extractor's own nor a channel or uploader, is yt-dlp's
+// placeholder for a video it could not load (removed, private, never
+// existed): that becomes a KindUnavailable error carrying yt-dlp's reason
+// from stderr. A real video keeps its metadata even when yt-dlp warned about
+// it (a bot check, an upcoming premiere).
+func decodeInfo(line string, info *VideoInfo, stderr string) error {
 	if line == "" || line == "NA" {
 		return &Error{Kind: KindParse, Msg: "yt-dlp returned no metadata for this URL"}
 	}
 	if err := json.Unmarshal([]byte(line), info); err != nil {
 		return &Error{Kind: KindParse, Msg: fmt.Sprintf("could not parse yt-dlp metadata: %v", err), Err: err}
 	}
+	if info.ID == "" || (info.FullTitle == "" && info.Channel == "" && info.Uploader == "") {
+		video := "the video"
+		if info.ID != "" {
+			video = fmt.Sprintf("video %q", info.ID)
+		}
+		return &Error{Kind: KindUnavailable, Msg: fmt.Sprintf("%s is unavailable: %s", video, unavailableReason(stderr, info.ID))}
+	}
 	return nil
+}
+
+// unavailableReason picks yt-dlp's explanation for a video it could not
+// load: the last ERROR line, else the last extractor warning ("WARNING:
+// [youtube] This video is unavailable"), with the level, the extractor tag
+// and a leading "<id>: " removed.
+func unavailableReason(stderr, id string) string {
+	var lastErr, lastWarn string
+	for _, l := range strings.Split(stderr, "\n") {
+		l = strings.TrimSpace(l)
+		if rest, ok := strings.CutPrefix(l, "ERROR:"); ok {
+			lastErr = rest
+		} else if rest, ok := strings.CutPrefix(l, "WARNING: ["); ok && strings.Contains(rest, "] ") {
+			lastWarn = "[" + rest
+		}
+	}
+	msg := lastErr
+	if msg == "" {
+		msg = lastWarn
+	}
+	msg = strings.TrimSpace(msg)
+	if strings.HasPrefix(msg, "[") {
+		if _, rest, ok := strings.Cut(msg, "] "); ok {
+			msg = rest
+		}
+	}
+	if id != "" {
+		msg = strings.TrimPrefix(msg, id+": ")
+	}
+	if msg = strings.TrimSpace(msg); msg == "" {
+		return "yt-dlp found no title, channel or other metadata for it; it may be private, removed or never have existed"
+	}
+	const maxLen = 600
+	if len(msg) > maxLen {
+		msg = strings.ToValidUTF8(msg[:maxLen], "") + "…"
+	}
+	return msg
 }
 
 // zipTracks pairs a ", "-joined key line with an optional JSON list of

@@ -131,6 +131,7 @@ const (
 	KindParse
 	KindNoSubtitles
 	KindInvalid
+	KindUnavailable
 )
 
 // Error is a failed yt-dlp invocation. Msg is written for the calling agent.
@@ -245,13 +246,14 @@ func scratchOwner(name string) (pid int, ok bool) {
 
 // run executes yt-dlp with BaseArgs, the operation's flags from build, "--"
 // and target, inside a fresh scratch directory. On a zero exit it calls
-// collect with that directory and the captured stdout before the directory
+// collect with that directory, the captured stdout and the tail of stderr
+// (where yt-dlp reports problems it did not exit for) before the directory
 // is removed.
 //
 // One deadline of cfg.Timeout covers the whole call: waiting for a
 // concurrency slot, running yt-dlp and collecting its output. A call that
 // queued for a slot therefore has correspondingly less time to run.
-func (r *Runner) run(ctx context.Context, op string, build func(dir string) []string, target string, collect func(dir string, stdout []byte) error) error {
+func (r *Runner) run(ctx context.Context, op string, build func(dir string) []string, target string, collect func(dir string, stdout []byte, stderr string) error) error {
 	timeoutCtx, cancelTimeout := context.WithTimeoutCause(ctx, r.cfg.Timeout, errTimeout)
 	defer cancelTimeout()
 
@@ -315,7 +317,7 @@ func (r *Runner) run(ctx context.Context, op string, build func(dir string) []st
 		return err
 	}
 	r.log.Info("yt-dlp finished", "op", op, "duration_ms", elapsed.Milliseconds(), "stdout_bytes", stdout.buf.Len())
-	return collect(dir, stdout.buf.Bytes())
+	return collect(dir, stdout.buf.Bytes(), stderr.String())
 }
 
 // classify turns the outcome of cmd.Run into an *Error, or nil on success.
