@@ -288,9 +288,12 @@ func (r *Runner) Transcript(ctx context.Context, target, lang string, src Source
 		out.Tracks.Manual = zipTracks(lines[1], "")
 		out.Tracks.Automatic = zipTracks(lines[2], "")
 
-		path, format, err := findSubtitleFile(dir, lang)
+		path, format, unsupported, err := findSubtitleFile(dir, lang)
 		if err != nil {
 			return err
+		}
+		if unsupported != "" {
+			return &Error{Kind: KindParse, Msg: unsupportedMessage(lang, unsupported, src, out.Tracks)}
 		}
 		if path == "" {
 			return &Error{Kind: KindNoSubtitles, Msg: noSubtitlesMessage(lang, src, out.Tracks)}
@@ -322,12 +325,15 @@ func (r *Runner) Transcript(ctx context.Context, target, lang string, src Source
 	return out, err
 }
 
-// findSubtitleFile locates transcriptBase.<lang>.<ext> in dir. It returns ""
-// when yt-dlp wrote nothing (the language does not exist for that source).
-func findSubtitleFile(dir, lang string) (string, transcript.Format, error) {
+// findSubtitleFile locates transcriptBase.<lang>.<ext> in dir for a
+// supported ext. Failing that it returns the extension of an unsupported
+// file yt-dlp wrote instead (yt-dlp falls back to the track's best format
+// when none of --sub-format is offered), or nothing at all when yt-dlp wrote
+// no file (the language does not exist for that source).
+func findSubtitleFile(dir, lang string) (path string, format transcript.Format, unsupported string, err error) {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
-		return "", "", &Error{Kind: KindParse, Msg: fmt.Sprintf("listing the scratch directory: %v", err), Err: err}
+		return "", "", "", &Error{Kind: KindParse, Msg: fmt.Sprintf("listing the scratch directory: %v", err), Err: err}
 	}
 	prefix := transcriptBase + "." + lang + "."
 	var found []string
@@ -339,14 +345,26 @@ func findSubtitleFile(dir, lang string) (string, transcript.Format, error) {
 	for _, f := range transcript.Formats {
 		name := prefix + string(f)
 		if slices.Contains(found, name) {
-			return filepath.Join(dir, name), f, nil
+			return filepath.Join(dir, name), f, "", nil
 		}
 	}
 	if len(found) > 0 {
-		ext := strings.TrimPrefix(found[0], prefix)
-		return "", "", &Error{Kind: KindParse, Msg: fmt.Sprintf("the %s track is only available as %q, which this server cannot convert (supported: json3, vtt, srt)", lang, ext)}
+		return "", "", strings.TrimPrefix(found[0], prefix), nil
 	}
-	return "", "", nil
+	return "", "", "", nil
+}
+
+// unsupportedMessage explains that the chosen track came only in a format
+// the server cannot convert. A manual track is preferred even then, since
+// yt-dlp picks the manual track before looking at formats; when automatic
+// captions exist in the same language the message points at source="auto"
+// instead of the server silently re-running yt-dlp for a machine track.
+func unsupportedMessage(lang, ext string, src Source, t Tracks) string {
+	msg := fmt.Sprintf("the %s track is only available as %q, which this server cannot convert (supported: json3, vtt, srt)", lang, ext)
+	if src != SourceAutomatic && slices.Contains(codes(t.Manual), lang) && slices.Contains(codes(t.Automatic), lang) {
+		msg += fmt.Sprintf("; automatic captions exist in %s, so retry with source=\"auto\"", lang)
+	}
+	return msg
 }
 
 // noSubtitlesMessage tells the agent what does exist.

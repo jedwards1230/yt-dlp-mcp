@@ -361,6 +361,7 @@ func TestTranscript(t *testing.T) {
 		{"manual vtt", manualURL, "de", SourceManual, "vtt", false, []string{"--write-subs"}, "--write-auto-subs"},
 		{"forced auto", manualURL, "en", SourceAutomatic, "json3", true, []string{"--write-auto-subs"}, "--write-subs"},
 		{"auto fallback", "https://www.youtube.com/watch?v=vidAutoOnly", "es-orig", SourceAny, "vtt", true, nil, ""},
+		{"auto when manual is unsupported", "https://www.youtube.com/watch?v=vidTtmlAuto", "en", SourceAutomatic, "json3", true, []string{"--write-auto-subs"}, "--write-subs"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -407,14 +408,18 @@ func TestTranscriptErrors(t *testing.T) {
 		src             Source
 		kind            ErrorKind
 		wantMsg         string
+		notWant         string
 	}{
-		{"missing language", manualURL, "xx", SourceAny, KindNoSubtitles, `no subtitles in language "xx"; available manual: en, de; auto: en-orig, en, de, fr (call list_subtitles for names)`},
-		{"missing manual", manualURL, "fr", SourceManual, KindNoSubtitles, `no manual subtitles in language "fr"; available manual: en, de;`},
-		{"no tracks at all", "https://www.youtube.com/watch?v=vidNoSubs00", "en", SourceAny, KindNoSubtitles, "available manual: none; auto: none"},
-		{"unsupported format", "https://www.youtube.com/watch?v=vidTtmlOnly", "en", SourceAny, KindParse, `only available as "ttml"`},
-		{"invalid lang regex", manualURL, "en.*", SourceAny, KindInvalid, "is not a subtitle language code"},
-		{"invalid lang list", manualURL, "en,all", SourceAny, KindInvalid, "is not a subtitle language code"},
-		{"invalid source", manualURL, "en", Source("both"), KindInvalid, "source \"both\""},
+		{"missing language", manualURL, "xx", SourceAny, KindNoSubtitles, `no subtitles in language "xx"; available manual: en, de; auto: en-orig, en, de, fr (call list_subtitles for names)`, ""},
+		{"missing manual", manualURL, "fr", SourceManual, KindNoSubtitles, `no manual subtitles in language "fr"; available manual: en, de;`, ""},
+		{"no tracks at all", "https://www.youtube.com/watch?v=vidNoSubs00", "en", SourceAny, KindNoSubtitles, "available manual: none; auto: none", ""},
+		{"unsupported format", "https://www.youtube.com/watch?v=vidTtmlOnly", "en", SourceAny, KindParse, `the en track is only available as "ttml", which this server cannot convert (supported: json3, vtt, srt)`, "retry"},
+		{"unsupported manual with automatic alternative", "https://www.youtube.com/watch?v=vidTtmlAuto", "en", SourceAny, KindParse,
+			`the en track is only available as "ttml", which this server cannot convert (supported: json3, vtt, srt); automatic captions exist in en, so retry with source="auto"`, ""},
+		{"forced manual with automatic alternative", "https://www.youtube.com/watch?v=vidTtmlAuto", "en", SourceManual, KindParse, `retry with source="auto"`, ""},
+		{"invalid lang regex", manualURL, "en.*", SourceAny, KindInvalid, "is not a subtitle language code", ""},
+		{"invalid lang list", manualURL, "en,all", SourceAny, KindInvalid, "is not a subtitle language code", ""},
+		{"invalid source", manualURL, "en", Source("both"), KindInvalid, "source \"both\"", ""},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -422,6 +427,9 @@ func TestTranscriptErrors(t *testing.T) {
 			e := wantKind(t, err, tt.kind)
 			if !strings.Contains(e.Msg, tt.wantMsg) {
 				t.Fatalf("message = %q, want containing %q", e.Msg, tt.wantMsg)
+			}
+			if tt.notWant != "" && strings.Contains(e.Msg, tt.notWant) {
+				t.Fatalf("message = %q, want without %q", e.Msg, tt.notWant)
 			}
 		})
 	}

@@ -346,6 +346,10 @@ func TestGetTranscriptAutomatic(t *testing.T) {
 	if tr.Source != "auto" || !tr.AutoTranslated {
 		t.Fatalf("translated transcript = %+v", tr)
 	}
+	retried := call[getTranscriptOutput](t, f, "get_transcript", map[string]any{"url": "vidTtmlAuto", "source": "auto"})
+	if retried.Source != "auto" || retried.Format != "json3" || retried.Text != "automatic english text" {
+		t.Fatalf("source=auto after an unconvertible manual track = %+v", retried)
+	}
 	forced := call[getTranscriptOutput](t, f, "get_transcript", map[string]any{"url": "vidManual01", "source": "auto"})
 	if forced.Source != "auto" || forced.AutoTranslated || forced.Text != "welcome to the workshop\ntoday we build" {
 		t.Fatalf("forced auto = %+v", forced)
@@ -365,6 +369,7 @@ func TestGetTranscriptErrors(t *testing.T) {
 		{"all languages", map[string]any{"url": "vidManual01", "lang": "all"}, "is not a subtitle language code"},
 		{"bad source", map[string]any{"url": "vidManual01", "source": "both"}, "source"},
 		{"negative offset", map[string]any{"url": "vidManual01", "offset": -1}, "negative"},
+		{"manual track unconvertible", map[string]any{"url": "vidTtmlAuto"}, `only available as "ttml", which this server cannot convert (supported: json3, vtt, srt); automatic captions exist in en, so retry with source="auto"`},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
