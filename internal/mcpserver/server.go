@@ -37,6 +37,13 @@ const (
 	defaultLang           = "en"
 )
 
+// Transcript cache bounds: at most cacheEntries transcripts and about
+// cacheBytes of memory, whichever binds first.
+const (
+	cacheEntries = 32
+	cacheBytes   = 64 << 20
+)
+
 // Backend is the subset of *ytdlp.Runner the tools use.
 type Backend interface {
 	Search(ctx context.Context, query string, limit int) ([]ytdlp.SearchEntry, error)
@@ -75,7 +82,7 @@ func New(opts Options) *mcp.Server {
 	s := &server{
 		backend: opts.Backend,
 		allow:   opts.Allowlist,
-		cache:   newTranscriptCache(opts.CacheTTL, 32, time.Now),
+		cache:   newTranscriptCache(opts.CacheTTL, cacheEntries, cacheBytes, time.Now),
 		log:     log,
 	}
 	srv := mcp.NewServer(&mcp.Implementation{Name: "yt-dlp-mcp", Version: version.Value}, &mcp.ServerOptions{

@@ -405,7 +405,7 @@ func TestClamp(t *testing.T) {
 func TestDescriptionTruncation(t *testing.T) {
 	b := &stubBackend{info: ytdlp.VideoInfo{ID: "x", Description: strings.Repeat("é", descriptionLimit+10)}}
 	allow, _ := urlguard.NewAllowlist(urlguard.DefaultHosts)
-	s := &server{backend: b, allow: allow, cache: newTranscriptCache(0, 1, time.Now), log: nil}
+	s := &server{backend: b, allow: allow, cache: newTranscriptCache(0, 1, 0, time.Now), log: nil}
 	s.log = discardLogger()
 	_, out, err := s.getInfo(t.Context(), nil, getInfoInput{URL: "dQw4w9WgXcQ"})
 	if err != nil {
