@@ -1,0 +1,131 @@
+#!/bin/sh
+# fake-yt-dlp: a stand-in for yt-dlp in unit tests. It never touches the
+# network. It understands the subset of the CLI the server uses:
+#   --version                      print a version and exit
+#   -O TEMPLATE (repeatable)       print one fixture line per template, in order
+#   --write-subs / --write-auto-subs, --sub-langs, --sub-format, -P, -o
+#                                  copy a fixture subtitle file into -P
+#   -- TARGET                      ytsearchN:QUERY or a watch?v=<id> URL
+# Fixture data lives in videos/<id>/ next to this script. Special ids exercise
+# failure paths: fakeSlow000 (hangs), fakeOrphan0 (hangs with a child process),
+# fakeFlood00 (floods stdout), fakeError00 (exits 1 with an ERROR line).
+# If FAKE_YTDLP_ARGV_FILE is set, the argv is written there, one per line.
+set -eu
+
+here=$(cd "$(dirname "$0")" && pwd)
+videos="$here/videos"
+
+if [ "${FAKE_YTDLP_ARGV_FILE:-}" != "" ]; then
+	printf '%s\n' "$@" >"$FAKE_YTDLP_ARGV_FILE"
+fi
+if [ "${FAKE_YTDLP_ENV_FILE:-}" != "" ]; then
+	env >"$FAKE_YTDLP_ENV_FILE"
+fi
+
+templates=""
+nl='
+'
+write_subs=0
+write_auto=0
+sub_langs=""
+sub_format=""
+paths="."
+outtmpl=""
+target=""
+while [ $# -gt 0 ]; do
+	case "$1" in
+	--version) echo "2026.10.21-fake"; exit 0 ;;
+	-O | --print) templates="$templates$2$nl"; shift ;;
+	--write-subs) write_subs=1 ;;
+	--write-auto-subs) write_auto=1 ;;
+	--sub-langs) sub_langs=$2; shift ;;
+	--sub-format) sub_format=$2; shift ;;
+	-P | --paths) paths=$2; shift ;;
+	-o | --output) outtmpl=$2; shift ;;
+	--use-extractors | --color | --playlist-items | --extractor-args) shift ;;
+	--) target=${2:-}; break ;;
+	esac
+	shift
+done
+
+case "$target" in
+ytsearch*:*)
+	n=${target#ytsearch}
+	n=${n%%:*}
+	query=${target#*:}
+	if [ "$query" = "fake-error" ]; then
+		echo "ERROR: [youtube:search] search failed" >&2
+		exit 1
+	fi
+	head -n "$n" "$videos/search.jsonl"
+	exit 0
+	;;
+*"watch?v="*) id=${target##*v=} ;;
+*) id=custom ;;
+esac
+
+case "$id" in
+fakeSlow000) sleep 30; exit 0 ;;
+fakeOrphan0)
+	sleep 30 &
+	echo "$!" >"${FAKE_YTDLP_PID_FILE:?}"
+	sleep 30
+	exit 0
+	;;
+fakeFlood00) head -c 1048576 /dev/zero | tr '\0' 'x'; sleep 30; exit 0 ;;
+fakeError00)
+	echo "WARNING: [youtube] fakeError00: a harmless warning" >&2
+	echo "ERROR: [youtube] fakeError00: Video unavailable. This video is private" >&2
+	exit 1
+	;;
+esac
+
+dir="$videos/$id"
+if [ ! -d "$dir" ]; then
+	echo "ERROR: [youtube] $id: Video unavailable" >&2
+	exit 1
+fi
+
+line() {
+	if [ -f "$dir/$1" ]; then cat "$dir/$1"; else echo "${2:-NA}"; fi
+}
+
+printf '%s' "$templates" | while IFS= read -r t; do
+	case "$t" in
+	'%(.{'*) line info.json ;;
+	'%(subtitles)l') line subtitles.keys ;;
+	'%(automatic_captions)l') line auto.keys ;;
+	'%(subtitles.:.0.{name,ext})j') line subtitles.names.json ;;
+	'%(automatic_captions.:.0.{name,ext})j') line auto.names.json ;;
+	*) echo NA ;;
+	esac
+done
+
+copy_sub() { # kind
+	old_ifs=$IFS
+	IFS=/
+	for ext in $sub_format; do
+		src="$dir/subs/$1.$sub_langs.$ext"
+		if [ -f "$src" ]; then
+			IFS=$old_ifs
+			cp "$src" "$paths/$outtmpl.$sub_langs.$ext"
+			return 0
+		fi
+	done
+	IFS=$old_ifs
+	for src in "$dir/subs/$1.$sub_langs."*; do
+		if [ -f "$src" ]; then
+			cp "$src" "$paths/$outtmpl.$sub_langs.${src##*.}"
+			return 0
+		fi
+	done
+	return 1
+}
+
+if [ "$write_subs" = 1 ] && copy_sub manual; then
+	exit 0
+fi
+if [ "$write_auto" = 1 ]; then
+	copy_sub auto || true
+fi
+exit 0

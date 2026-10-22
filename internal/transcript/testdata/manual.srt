@@ -1,0 +1,16 @@
+1
+00:00:01,200 --> 00:00:03,600
+<i>[soft piano music]</i>
+
+2
+00:00:04,100 --> 00:00:07,300
+{\an8}Welcome back to the workshop.
+Today we are building a bookshelf.
+
+3
+00:00:07,400 --> 00:00:10,200
+First, measure twice and cut once.
+
+4
+01:02:05,000 --> 01:02:07,500
+That's it for the long session.
