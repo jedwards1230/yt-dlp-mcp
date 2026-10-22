@@ -224,7 +224,10 @@ func TestServeGracefulShutdown(t *testing.T) {
 
 	cancel()
 	select {
-	case <-done:
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("Serve after the grace period = %v, want nil", err)
+		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("Serve did not return after the grace period")
 	}
