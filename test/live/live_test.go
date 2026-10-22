@@ -22,19 +22,27 @@ import (
 	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
+
+	"github.com/jedwards1230/yt-dlp-mcp/internal/ytdlp"
 )
 
 // Configuration, all optional:
 //
-//	YTDLP_MCP_LIVE_IMAGE  image to start (default yt-dlp-mcp:smoke); build it
-//	                      first with `docker build -t yt-dlp-mcp:smoke .`
-//	YTDLP_MCP_LIVE_URL    MCP endpoint of an already-running server, e.g.
-//	                      http://localhost:8080/mcp; no container is started
-//	YTDLP_MCP_LIVE_TOKEN  that server's bearer token, if it has one (a started
-//	                      container always gets a random token)
-//	YTDLP_MCP_LIVE_VIDEO  public video id with manual English subtitles and
-//	                      automatic captions
-//	YTDLP_MCP_LIVE_QUERY  search query
+//	YTDLP_MCP_LIVE_IMAGE    image to start (default yt-dlp-mcp:smoke). Build
+//	                        it first with BuildKit, which the Dockerfile
+//	                        needs (the legacy builder cannot run it):
+//	                        `docker buildx build --load -t yt-dlp-mcp:smoke .`
+//	YTDLP_MCP_LIVE_URL      MCP endpoint of an already-running server, e.g.
+//	                        http://localhost:8080/mcp; no container is started
+//	YTDLP_MCP_LIVE_TOKEN    that server's bearer token, if it has one (a
+//	                        started container always gets a random token)
+//	YTDLP_MCP_LIVE_VIDEO    public video id with manual English subtitles and
+//	                        automatic captions
+//	YTDLP_MCP_LIVE_NAMED    public video id whose manual English track YouTube
+//	                        codes "en-<track id>" (a named track), with no
+//	                        plain "en" manual track
+//	YTDLP_MCP_LIVE_MISSING  11-character id of a video that does not exist
+//	YTDLP_MCP_LIVE_QUERY    search query
 //
 // Run: go test -tags live -count=1 -v ./test/live/
 const (
@@ -42,9 +50,13 @@ const (
 	// A long-lived public talk with uploaded subtitles in dozens of
 	// languages (English included) and automatic captions.
 	defaultVideo = "iG9CE55wbtY"
-	defaultQuery = "ted talk creativity schools"
-	callTimeout  = 2 * time.Minute
-	pageLimit    = 40
+	// A public commencement address whose manual English and Spanish tracks
+	// are named tracks ("en-<id>", "es-<id>").
+	defaultNamedVideo = "UF8uR6Z6KLc"
+	defaultMissing    = "aaaaaaaaaaa"
+	defaultQuery      = "ted talk creativity schools"
+	callTimeout       = 2 * time.Minute
+	pageLimit         = 40
 )
 
 var timestampRe = regexp.MustCompile(`^\[(\d{2}:)?\d{2}:\d{2}\] `)
@@ -94,7 +106,7 @@ func startContainer(t *testing.T, image, token string) (*container, string) {
 		"-e", "YTDLP_MCP_AUTH_TOKEN", "-e", "YTDLP_MCP_LOG_LEVEL=debug",
 		image)
 	if err != nil {
-		t.Fatalf("docker run %s: %v\n%s\n(build the image first: docker build -t %s .)", image, err, id, image)
+		t.Fatalf("docker run %s: %v\n%s\n(build the image first, with BuildKit: docker buildx build --load -t %s .)", image, err, id, image)
 	}
 	c := &container{id: id}
 	t.Cleanup(func() {
@@ -585,6 +597,66 @@ func TestLiveSmoke(t *testing.T) {
 		s.call(t, "get_transcript", "auto "+autoOriginal+", timestamps", map[string]any{"url": video, "lang": autoOriginal, "source": "auto", "limit": pageLimit, "timestamps": true}, &pts)
 		checkTimestamped(t, p, pts)
 		t.Logf("auto with timestamps: first line %q", excerpt(pts.lines()[0], 80))
+	})
+
+	t.Run("named_manual_track", func(t *testing.T) {
+		named := env("YTDLP_MCP_LIVE_NAMED", defaultNamedVideo)
+		var out struct {
+			Manual        []track  `json:"manual"`
+			Automatic     []track  `json:"automatic"`
+			Unrequestable []string `json:"unrequestable"`
+			Hint          string   `json:"hint"`
+		}
+		s.call(t, "list_subtitles", "named tracks "+named, map[string]any{"url": named, "include_translations": true}, &out)
+		var codes []string
+		for _, tr := range append(slices.Clone(out.Manual), out.Automatic...) {
+			if err := ytdlp.ValidateLang(tr.Code); err != nil {
+				t.Errorf("list_subtitles listed %q, which get_transcript rejects: %v", tr.Code, err)
+			}
+			codes = append(codes, tr.Code)
+		}
+		if len(out.Unrequestable) != 0 {
+			t.Errorf("YouTube codes reported unrequestable: %q", out.Unrequestable)
+		}
+		var enNamed string
+		for _, m := range out.Manual {
+			if m.Code == "en" {
+				t.Fatalf("video %s has a plain en manual track; pick one with only a named English track", named)
+			}
+			if enNamed == "" && ytdlp.IsNamedTrack(m.Code, "en") {
+				enNamed = m.Code
+			}
+		}
+		if enNamed == "" {
+			t.Fatalf("video %s lists no named English manual track: %+v", named, out.Manual)
+		}
+		if !strings.Contains(out.Hint, fmt.Sprintf("lang=%q", enNamed)) {
+			t.Errorf("hint %q does not suggest %s", out.Hint, enNamed)
+		}
+		t.Logf("list_subtitles %s: manual %q; hint: %s", named, codes[:len(out.Manual)], out.Hint)
+
+		var direct, def transcriptPage
+		s.call(t, "get_transcript", "named manual "+enNamed, map[string]any{"url": named, "lang": enNamed, "source": "manual", "limit": pageLimit}, &direct)
+		if direct.Source != "manual" || direct.Lang != enNamed || direct.Returned == 0 {
+			t.Fatalf("lang=%s = %+v", enNamed, direct)
+		}
+		s.call(t, "get_transcript", "default lang en, named track", map[string]any{"url": named, "limit": pageLimit}, &def)
+		if def.Source != "manual" || def.Lang != enNamed || def.Text != direct.Text {
+			t.Fatalf("default call = %s/%s, want the named manual track %s", def.Source, def.Lang, enNamed)
+		}
+		t.Logf("named manual %s: %s, %d segments; first line %q", enNamed, def.Format, def.TotalSegments, excerpt(def.lines()[0], 80))
+	})
+
+	t.Run("unavailable_video", func(t *testing.T) {
+		missing := env("YTDLP_MCP_LIVE_MISSING", defaultMissing)
+		want := fmt.Sprintf("video %q is unavailable: ", missing)
+		for _, tool := range []string{"get_info", "list_subtitles", "get_transcript"} {
+			msg := s.callErr(t, tool, "missing "+missing, map[string]any{"url": missing})
+			if !strings.HasPrefix(msg, want) {
+				t.Errorf("%s(%s) error = %q, want prefix %q", tool, missing, msg, want)
+			}
+			t.Logf("%s(%s): %s", tool, missing, msg)
+		}
 	})
 
 	t.Run("ssrf_rejected_before_exec", func(t *testing.T) {
