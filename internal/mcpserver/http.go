@@ -33,9 +33,14 @@ func NewHandler(srv *mcp.Server, authToken string, log *slog.Logger) http.Handle
 		log = slog.New(slog.DiscardHandler)
 	}
 	// Stateless: every request is self-contained, so any replica can answer
-	// it and no session state accumulates. PropagateRequestCancellation ties
-	// a tool call's context to its HTTP request, so a client that gives up
-	// also kills the yt-dlp process working for it.
+	// it and no session state accumulates.
+	//
+	// PropagateRequestCancellation ties a tool call's context to its HTTP
+	// request, so a client that disconnects also kills the yt-dlp process
+	// working for it, but go-sdk applies it only to clients speaking
+	// protocol 2026-07-28 or later. For older clients a disconnect does not
+	// cancel the call: yt-dlp runs on until it finishes or YTDLP_MCP_TIMEOUT
+	// expires, which still bounds it.
 	var mcpHandler http.Handler = mcp.NewStreamableHTTPHandler(
 		func(*http.Request) *mcp.Server { return srv },
 		&mcp.StreamableHTTPOptions{Stateless: true, PropagateRequestCancellation: true},
@@ -82,8 +87,10 @@ func NewHTTPServer(h http.Handler) *http.Server {
 
 // Serve serves h on ln until ctx is canceled, then shuts down gracefully:
 // it stops accepting connections and waits up to shutdownTimeout for
-// in-flight tool calls before closing them (which cancels their yt-dlp
-// processes).
+// in-flight tool calls before closing their connections. Closing a
+// connection cancels the tool call, and with it the yt-dlp process, only for
+// clients the SDK propagates request cancellation for (see NewHandler); an
+// older client's call is left to its YTDLP_MCP_TIMEOUT deadline.
 func Serve(ctx context.Context, ln net.Listener, h http.Handler, shutdownTimeout time.Duration, log *slog.Logger) error {
 	if log == nil {
 		log = slog.New(slog.DiscardHandler)
