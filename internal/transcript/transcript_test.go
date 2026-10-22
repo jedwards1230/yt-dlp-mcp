@@ -151,24 +151,24 @@ func TestPaginate(t *testing.T) {
 	}
 	tests := []struct {
 		name                    string
-		offset, limit, maxChars int
+		offset, limit, maxBytes int
 		ts                      bool
 		wantText                string
 		wantNext, wantReturned  int
 		wantMore                bool
 		wantErr                 string
 	}{
-		{name: "first page by limit", offset: 0, limit: 2, maxChars: 1000, wantText: "alpha\nbravo", wantNext: 2, wantReturned: 2, wantMore: true},
-		{name: "last page", offset: 2, limit: 10, maxChars: 1000, wantText: "charlie\ndelta", wantNext: 4, wantReturned: 2},
-		{name: "char budget stops early", offset: 0, limit: 10, maxChars: 11, wantText: "alpha\nbravo", wantNext: 2, wantReturned: 2, wantMore: true},
-		{name: "oversized single line still returned", offset: 0, limit: 10, maxChars: 3, wantText: "alpha", wantNext: 1, wantReturned: 1, wantMore: true},
-		{name: "timestamps switch to hours", offset: 1, limit: 2, maxChars: 1000, ts: true, wantText: "[01:05] bravo\n[02:00:00] charlie", wantNext: 3, wantReturned: 2, wantMore: true},
-		{name: "offset at end", offset: 4, limit: 1, maxChars: 1000, wantErr: "past the end of the transcript (4 segments; valid offsets are 0-3)"},
-		{name: "negative offset", offset: -1, limit: 1, maxChars: 1000, wantErr: "negative"},
+		{name: "first page by limit", offset: 0, limit: 2, maxBytes: 1000, wantText: "alpha\nbravo", wantNext: 2, wantReturned: 2, wantMore: true},
+		{name: "last page", offset: 2, limit: 10, maxBytes: 1000, wantText: "charlie\ndelta", wantNext: 4, wantReturned: 2},
+		{name: "byte budget stops early", offset: 0, limit: 10, maxBytes: 11, wantText: "alpha\nbravo", wantNext: 2, wantReturned: 2, wantMore: true},
+		{name: "oversized single line still returned", offset: 0, limit: 10, maxBytes: 3, wantText: "alpha", wantNext: 1, wantReturned: 1, wantMore: true},
+		{name: "timestamps switch to hours", offset: 1, limit: 2, maxBytes: 1000, ts: true, wantText: "[01:05] bravo\n[02:00:00] charlie", wantNext: 3, wantReturned: 2, wantMore: true},
+		{name: "offset at end", offset: 4, limit: 1, maxBytes: 1000, wantErr: "past the end of the transcript (4 segments; valid offsets are 0-3)"},
+		{name: "negative offset", offset: -1, limit: 1, maxBytes: 1000, wantErr: "negative"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			p, err := Paginate(segs, tt.offset, tt.limit, tt.maxChars, tt.ts)
+			p, err := Paginate(segs, tt.offset, tt.limit, tt.maxBytes, tt.ts)
 			if tt.wantErr != "" {
 				if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
 					t.Fatalf("err = %v, want containing %q", err, tt.wantErr)
@@ -234,6 +234,22 @@ func TestParseCueSeparators(t *testing.T) {
 				t.Fatalf("Parse = %q, want %q", got, tt.want)
 			}
 		})
+	}
+}
+
+// TestPaginateCountsBytes pins the unit of the page budget: UTF-8 bytes,
+// not characters. "éé\né" is 4 characters but 7 bytes.
+func TestPaginateCountsBytes(t *testing.T) {
+	segs := []Segment{{0, "éé"}, {time.Second, "é"}}
+	p, err := Paginate(segs, 0, 10, 6, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p.Text != "éé" || p.Returned != 1 || !p.HasMore {
+		t.Fatalf("6-byte budget = %+v, want only the first segment", p)
+	}
+	if p, _ := Paginate(segs, 0, 10, 7, false); p.Text != "éé\né" || p.HasMore {
+		t.Fatalf("7-byte budget = %+v, want both segments", p)
 	}
 }
 

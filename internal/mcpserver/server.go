@@ -5,7 +5,7 @@
 // Every URL argument is resolved through urlguard before ytdlp is called, and
 // every result is bounded: search is capped at 25 hits, descriptions are
 // truncated unless asked for, the automatic-caption list is compact by
-// default, and transcripts are paginated by segment with a per-page character
+// default, and transcripts are paginated by segment with a per-page byte
 // budget. Tool errors are returned as MCP tool errors (isError results) whose
 // text tells the agent what to do next.
 package mcpserver
@@ -33,7 +33,7 @@ const (
 	descriptionLimit      = 1500
 	defaultTranscriptPage = 500
 	maxTranscriptPage     = 2000
-	maxPageChars          = 40000
+	maxPageBytes          = 40000 // UTF-8 bytes of page text, not characters
 	defaultLang           = "en"
 )
 
@@ -120,7 +120,7 @@ func New(opts Options) *mcp.Server {
 		Description: "Fetch a video's subtitles as clean plain text: one caption line per output line, markup and inline timestamps stripped, " +
 			"automatic-caption rolling duplicates removed. Uses the manual track in `lang` when there is one and falls back to automatic " +
 			"captions, unless `source` says otherwise. Paginated by segment (caption line): check has_more and pass next_offset as offset " +
-			fmt.Sprintf("to continue. A page holds at most `limit` segments and about %d characters.", maxPageChars),
+			fmt.Sprintf("to continue. A page holds at most `limit` segments and at most %d bytes of text; a single longer line comes back alone.", maxPageBytes),
 		Annotations: readOnly("Get transcript"),
 		InputSchema: inputSchema[getTranscriptInput](
 			map[string]any{"lang": defaultLang, "source": "any", "offset": 0, "limit": defaultTranscriptPage},

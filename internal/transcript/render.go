@@ -68,11 +68,13 @@ type Page struct {
 	HasMore bool
 }
 
-// Paginate renders segments[offset:] until limit segments or maxChars
-// characters are reached, whichever comes first. A page always holds at least
-// one segment when any remain, so a single oversized line cannot stall
-// pagination. An offset past the end is an error that names the valid range.
-func Paginate(segs []Segment, offset, limit, maxChars int, timestamps bool) (Page, error) {
+// Paginate renders segments[offset:] until limit segments are on the page or
+// the next line would take the page's text past maxBytes bytes (UTF-8,
+// newlines and timestamps included), whichever comes first. A page always
+// holds at least one segment when any remain, so a single oversized line
+// cannot stall pagination. An offset past the end is an error that names the
+// valid range.
+func Paginate(segs []Segment, offset, limit, maxBytes int, timestamps bool) (Page, error) {
 	total := len(segs)
 	if offset < 0 {
 		return Page{}, fmt.Errorf("offset %d is negative; start at 0", offset)
@@ -95,7 +97,7 @@ func Paginate(segs []Segment, offset, limit, maxChars int, timestamps bool) (Pag
 		if b.Len() > 0 {
 			extra++ // newline separator
 		}
-		if b.Len() > 0 && b.Len()+extra > maxChars {
+		if b.Len() > 0 && b.Len()+extra > maxBytes {
 			break
 		}
 		if b.Len() > 0 {

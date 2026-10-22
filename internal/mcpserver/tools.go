@@ -376,7 +376,7 @@ func (s *server) getTranscript(ctx context.Context, _ *mcp.CallToolRequest, in g
 		s.cache.put(key, t)
 	}
 
-	page, err := transcript.Paginate(t.segments, in.Offset, limit, maxPageChars, in.Timestamps)
+	page, err := transcript.Paginate(t.segments, in.Offset, limit, maxPageBytes, in.Timestamps)
 	if err != nil {
 		return nil, out, err
 	}
