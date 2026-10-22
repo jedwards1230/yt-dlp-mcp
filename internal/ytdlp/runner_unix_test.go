@@ -3,9 +3,11 @@
 package ytdlp
 
 import (
+	"bytes"
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"syscall"
@@ -30,8 +32,13 @@ func TestTimeoutKillsProcessGroup(t *testing.T) {
 	if elapsed := time.Since(start); elapsed > 5*time.Second {
 		t.Fatalf("timeout took %s", elapsed)
 	}
+	requireGone(t, readPid(t, pidFile), 3*time.Second)
+}
 
-	data, err := os.ReadFile(pidFile)
+// readPid reads the child pid the fake recorded.
+func readPid(t *testing.T, path string) int {
+	t.Helper()
+	data, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatalf("child pid not recorded: %v", err)
 	}
@@ -39,15 +46,85 @@ func TestTimeoutKillsProcessGroup(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	deadline := time.Now().Add(3 * time.Second)
-	for {
-		if err := syscall.Kill(pid, 0); errors.Is(err, syscall.ESRCH) {
-			return
-		}
+	return pid
+}
+
+// requireGone fails the test unless pid stops running within grace. A
+// process that outlives it is killed so it cannot leak past the test.
+func requireGone(t *testing.T, pid int, grace time.Duration) {
+	t.Helper()
+	deadline := time.Now().Add(grace)
+	for !processGone(pid) {
 		if time.Now().After(deadline) {
 			_ = syscall.Kill(pid, syscall.SIGKILL)
-			t.Fatalf("child process %d survived the timeout", pid)
+			t.Fatalf("child process %d is still running %s after the call returned", pid, grace)
 		}
 		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+// processGone reports whether pid has stopped running. A zombie (exited but
+// not yet reaped by whichever process inherited it) counts as gone, although
+// kill(pid, 0) still succeeds on one; on Linux the state letter in
+// /proc/<pid>/stat tells the two apart. Other systems fall back to kill alone.
+func processGone(pid int) bool {
+	if err := syscall.Kill(pid, 0); errors.Is(err, syscall.ESRCH) {
+		return true
+	}
+	if runtime.GOOS != "linux" {
+		return false
+	}
+	data, err := os.ReadFile(filepath.Join("/proc", strconv.Itoa(pid), "stat"))
+	if err != nil {
+		return errors.Is(err, os.ErrNotExist)
+	}
+	// "pid (comm) S ...": the state follows the last ')', since comm may
+	// itself contain spaces and parentheses.
+	i := bytes.LastIndexByte(data, ')')
+	if i < 0 || i+2 >= len(data) {
+		return false
+	}
+	switch data[i+2] {
+	case 'Z', 'X', 'x': // zombie, dead
+		return true
+	}
+	return false
+}
+
+// TestProcessGone pins the zombie handling the process-group tests rely on:
+// an exited child its parent has not reaped yet is a zombie, which kill(pid,
+// 0) still reports as present.
+func TestProcessGone(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("zombie detection reads /proc")
+	}
+	var attr syscall.SysProcAttr
+	pid, err := syscall.ForkExec("/bin/sh", []string{"sh", "-c", "exit 0"}, &syscall.ProcAttr{Sys: &attr})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Not reaped yet: wait for it to become a zombie.
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		if err := syscall.Kill(pid, 0); err != nil {
+			t.Fatalf("unreaped child %d: kill(pid, 0) = %v, want success on a zombie", pid, err)
+		}
+		if processGone(pid) {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("exited child %d never reported gone", pid)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	var ws syscall.WaitStatus
+	if _, err := syscall.Wait4(pid, &ws, 0, nil); err != nil {
+		t.Fatal(err)
+	}
+	if !processGone(pid) {
+		t.Fatalf("reaped child %d reported running", pid)
+	}
+	if processGone(os.Getpid()) {
+		t.Fatal("the test process itself reported gone")
 	}
 }
