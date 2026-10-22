@@ -356,7 +356,7 @@ func (s *server) getTranscript(ctx context.Context, _ *mcp.CallToolRequest, in g
 		src = ytdlp.SourceAny
 	case "manual":
 		src = ytdlp.SourceManual
-	case "auto", "automatic":
+	case "auto":
 		src = ytdlp.SourceAutomatic
 	default:
 		return nil, out, fmt.Errorf("source %q is not one of any, manual, auto", in.Source)
