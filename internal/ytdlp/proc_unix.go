@@ -4,6 +4,7 @@ package ytdlp
 
 import (
 	"errors"
+	"io/fs"
 	"os"
 	"os/exec"
 	"syscall"
@@ -28,4 +29,16 @@ func killGroup(cmd *exec.Cmd) error {
 		return os.ErrProcessDone
 	}
 	return err
+}
+
+// processExists reports whether pid names a process, including one owned by
+// another user (EPERM) or a zombie; when unsure it says yes.
+func processExists(pid int) bool {
+	return !errors.Is(syscall.Kill(pid, 0), syscall.ESRCH)
+}
+
+// ownedByCurrentUser reports whether info belongs to this process's user.
+func ownedByCurrentUser(info fs.FileInfo) bool {
+	st, ok := info.Sys().(*syscall.Stat_t)
+	return ok && int(st.Uid) == os.Getuid()
 }

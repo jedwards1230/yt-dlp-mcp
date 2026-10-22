@@ -84,7 +84,8 @@ securityContext:
       - ALL
 
 # The only writable path. Each call gets a scratch directory here, removed
-# when the call ends; subtitle files never exceed config.maxOutputBytes.
+# when the call ends (or at the next start, if the container was killed
+# mid-call); subtitle files never exceed config.maxOutputBytes.
 tmp:
   sizeLimit: 256Mi
   # "Memory" makes it a tmpfs, which counts against the memory limit.

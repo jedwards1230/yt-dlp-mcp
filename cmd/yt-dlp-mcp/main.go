@@ -65,6 +65,14 @@ func run() error {
 		return err
 	}
 
+	// Before any yt-dlp run: sweep scratch directories a killed predecessor
+	// left in the temp dir (best effort; a failure only costs disk space).
+	if n, err := runner.RemoveStaleScratch(); err != nil {
+		log.Warn("removing stale scratch directories failed", "removed", n, "error", err)
+	} else if n > 0 {
+		log.Info("removed stale scratch directories", "count", n)
+	}
+
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 

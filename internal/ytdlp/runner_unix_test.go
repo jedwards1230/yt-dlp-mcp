@@ -5,9 +5,12 @@ package ytdlp
 import (
 	"bytes"
 	"errors"
+	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strconv"
 	"strings"
 	"syscall"
@@ -74,6 +77,97 @@ func TestRunKillsLeftoverChildren(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestRemoveStaleScratch sweeps a temp dir holding leftovers of this
+// process and of a dead one next to a live server's directory, legacy and
+// unrelated names, a plain file and a symbolic link: only the two stale
+// directories go, and the link's target is untouched.
+func TestRemoveStaleScratch(t *testing.T) {
+	tmp := t.TempDir()
+	r := newRunner(t, func(c *Config) { c.TempDir = tmp })
+
+	dead := exec.Command("true")
+	if err := dead.Run(); err != nil {
+		t.Fatal(err)
+	}
+	self := os.Getpid()
+	mkdir := func(name string) {
+		t.Helper()
+		if err := os.MkdirAll(filepath.Join(tmp, name, ".cache"), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(tmp, name, "transcript.en.vtt"), []byte("WEBVTT\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	stale := []string{
+		fmt.Sprintf("yt-dlp-mcp-%d-111", self),             // this process, earlier run
+		fmt.Sprintf("yt-dlp-mcp-%d-222", dead.Process.Pid), // a server that is gone
+	}
+	kept := []string{
+		fmt.Sprintf("yt-dlp-mcp-%d-333", os.Getppid()), // a live server
+		"yt-dlp-mcp-12345", // no pid tag
+		"yt-dlp-mcp-x-444", // not a pid
+		"other-tool-555",
+	}
+	for _, name := range append(slices.Clone(stale), kept...) {
+		mkdir(name)
+	}
+	file := fmt.Sprintf("yt-dlp-mcp-%d-file", self)
+	if err := os.WriteFile(filepath.Join(tmp, file), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	target := t.TempDir()
+	if err := os.WriteFile(filepath.Join(target, "keep"), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	link := fmt.Sprintf("yt-dlp-mcp-%d-link", self)
+	if err := os.Symlink(target, filepath.Join(tmp, link)); err != nil {
+		t.Fatal(err)
+	}
+
+	n, err := r.RemoveStaleScratch()
+	if err != nil || n != len(stale) {
+		t.Fatalf("RemoveStaleScratch = %d, %v; want %d, nil", n, err, len(stale))
+	}
+	entries, err := os.ReadDir(tmp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var left []string
+	for _, e := range entries {
+		left = append(left, e.Name())
+	}
+	want := append(slices.Clone(kept), file, link)
+	slices.Sort(left)
+	slices.Sort(want)
+	if !slices.Equal(left, want) {
+		t.Fatalf("left %q, want %q", left, want)
+	}
+	if _, err := os.Stat(filepath.Join(target, "keep")); err != nil {
+		t.Fatalf("symlink target was touched: %v", err)
+	}
+
+	// A call's own scratch directory carries this process's pid.
+	envFile := filepath.Join(t.TempDir(), "env")
+	r.extraEnv = []string{"FAKE_YTDLP_ENV_FILE=" + envFile}
+	if _, _, err := r.Info(t.Context(), manualURL); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(envFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, l := range strings.Split(string(data), "\n") {
+		if home, ok := strings.CutPrefix(l, "HOME="); ok {
+			if pid, ok := scratchOwner(filepath.Base(home)); !ok || pid != self || filepath.Dir(home) != tmp {
+				t.Fatalf("scratch dir %q is not %s/yt-dlp-mcp-%d-*", home, tmp, self)
+			}
+			return
+		}
+	}
+	t.Fatal("child environment has no HOME")
 }
 
 // readPid reads the child pid the fake recorded.

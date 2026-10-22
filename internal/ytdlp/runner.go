@@ -10,7 +10,8 @@
 //     self-contained: no config files, plugins, cookies, cache, remote
 //     components or generic extractor;
 //   - a per-call scratch directory (HOME, caches and any subtitle file live
-//     there) that is removed when the call returns;
+//     there) that is removed when the call returns, and swept at startup
+//     ([Runner.RemoveStaleScratch]) if a killed server left it behind;
 //   - a sanitized environment that passes through only PATH, locale, TLS and
 //     proxy variables, so server secrets never reach the child;
 //   - a per-call deadline and a stdout byte cap, both enforced by killing the
@@ -31,6 +32,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -151,7 +153,7 @@ var (
 func (r *Runner) Version(ctx context.Context) (string, error) {
 	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
-	dir, err := os.MkdirTemp(r.cfg.TempDir, "yt-dlp-mcp-*")
+	dir, err := r.mkScratch()
 	if err != nil {
 		return "", fmt.Errorf("creating scratch directory: %w", err)
 	}
@@ -167,6 +169,78 @@ func (r *Runner) Version(ctx context.Context) (string, error) {
 		return "", fmt.Errorf("running %s --version: %w", r.cfg.Path, err)
 	}
 	return strings.TrimSpace(string(out)), nil
+}
+
+// scratchPrefix starts every per-call scratch directory name. The server's
+// pid follows it ("yt-dlp-mcp-<pid>-<random>"), so RemoveStaleScratch can
+// tell a dead server's leftovers from a live one's.
+const scratchPrefix = "yt-dlp-mcp-"
+
+// tempDir is the parent of the scratch directories.
+func (r *Runner) tempDir() string {
+	if r.cfg.TempDir != "" {
+		return r.cfg.TempDir
+	}
+	return os.TempDir()
+}
+
+// mkScratch creates a fresh scratch directory tagged with this process's pid.
+func (r *Runner) mkScratch() (string, error) {
+	return os.MkdirTemp(r.tempDir(), fmt.Sprintf("%s%d-*", scratchPrefix, os.Getpid()))
+}
+
+// RemoveStaleScratch deletes scratch directories no running call owns: those
+// a server killed before its deferred cleanup ran (SIGKILL, an OOM kill) left
+// behind. A container's writable /tmp usually outlives a restart, so they
+// would otherwise pile up. It only considers directories, owned by this
+// user, named yt-dlp-mcp-<pid>-*, and only when <pid> is this process (an
+// earlier run in a recycled pid namespace) or no longer exists, so a live
+// server sharing the temp dir keeps its directories. Symbolic links are never
+// followed. Call it once at startup, before the first tool call; it returns
+// how many directories it removed.
+func (r *Runner) RemoveStaleScratch() (int, error) {
+	dir := r.tempDir()
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return 0, fmt.Errorf("listing %s: %w", dir, err)
+	}
+	self := os.Getpid()
+	removed := 0
+	var errs []error
+	for _, e := range entries {
+		pid, ok := scratchOwner(e.Name())
+		if !ok || !e.IsDir() || (pid != self && processExists(pid)) {
+			continue
+		}
+		info, err := e.Info()
+		if err != nil || !ownedByCurrentUser(info) {
+			continue
+		}
+		if err := os.RemoveAll(filepath.Join(dir, e.Name())); err != nil {
+			errs = append(errs, err)
+			continue
+		}
+		removed++
+	}
+	return removed, errors.Join(errs...)
+}
+
+// scratchOwner returns the pid in a scratch directory name
+// ("yt-dlp-mcp-<pid>-<random>"); ok is false for any other name.
+func scratchOwner(name string) (pid int, ok bool) {
+	rest, ok := strings.CutPrefix(name, scratchPrefix)
+	if !ok {
+		return 0, false
+	}
+	digits, suffix, ok := strings.Cut(rest, "-")
+	if !ok || suffix == "" {
+		return 0, false
+	}
+	pid, err := strconv.Atoi(digits)
+	if err != nil || pid <= 0 {
+		return 0, false
+	}
+	return pid, true
 }
 
 // run executes yt-dlp with BaseArgs, the operation's flags from build, "--"
@@ -188,7 +262,7 @@ func (r *Runner) run(ctx context.Context, op string, build func(dir string) []st
 	defer func() { <-r.sem }()
 	waited := time.Since(queued)
 
-	dir, err := os.MkdirTemp(r.cfg.TempDir, "yt-dlp-mcp-*")
+	dir, err := r.mkScratch()
 	if err != nil {
 		return &Error{Kind: KindStart, Msg: fmt.Sprintf("could not create a scratch directory: %v", err), Err: err}
 	}
