@@ -22,3 +22,9 @@ linters:
       - path: _test\.go
         linters:
           - gosec
+# `golangci-lint run` reports any file gofmt would change (simplify on, as with
+# `gofmt -s`), so CI's Lint job enforces formatting. `golangci-lint fmt`
+# rewrites the files in place.
+formatters:
+  enable:
+    - gofmt
