@@ -16,7 +16,8 @@
 //   - a per-call deadline and a stdout byte cap, both enforced by killing the
 //     whole process group (yt-dlp and any JavaScript runtime it spawned); the
 //     deadline covers the wait for a concurrency slot as well as the run, so
-//     no call outlives the configured timeout;
+//     no call outlives the configured timeout. The group is killed again
+//     whenever yt-dlp exits, so no child outlives the call either;
 //   - a global concurrency limit shared by all tools.
 package ytdlp
 
@@ -161,6 +162,7 @@ func (r *Runner) Version(ctx context.Context) (string, error) {
 	setProcessGroup(cmd)
 	cmd.WaitDelay = waitDelay
 	out, err := cmd.Output()
+	_ = killGroup(cmd) // as in run: nothing yt-dlp started outlives the call
 	if err != nil {
 		return "", fmt.Errorf("running %s --version: %w", r.cfg.Path, err)
 	}
@@ -221,9 +223,17 @@ func (r *Runner) run(ctx context.Context, op string, build func(dir string) []st
 	runErr := cmd.Run()
 	elapsed := time.Since(start)
 
+	// yt-dlp is gone, but a child it started (the JavaScript runtime) may
+	// not be: it can outlive a non-zero exit, or have redirected its stdio
+	// so Wait never noticed it. Kill whatever is left of the group on every
+	// path, before the deferred RemoveAll, so nothing writes into the
+	// scratch directory after it is removed. An already-empty group is a
+	// harmless ESRCH. The group id only becomes reusable once every member
+	// is gone, and pids are handed out sequentially, so a kill issued right
+	// after Wait cannot plausibly reach an unrelated group.
+	_ = killGroup(cmd)
 	if errors.Is(runErr, exec.ErrWaitDelay) {
-		// yt-dlp exited but a grandchild kept the pipes open: reap the group.
-		_ = killGroup(cmd)
+		// yt-dlp itself succeeded; only a child kept the pipes open.
 		runErr = nil
 	}
 	if err := r.classify(ctx, runCtx, runErr, waited, stdout, stderr); err != nil {

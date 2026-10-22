@@ -35,6 +35,47 @@ func TestTimeoutKillsProcessGroup(t *testing.T) {
 	requireGone(t, readPid(t, pidFile), 3*time.Second)
 }
 
+// TestRunKillsLeftoverChildren covers the exits a timeout never sees:
+// yt-dlp ends on its own, successfully or not, but leaves a child running,
+// either detached from its stdio (so Wait returns at once) or still holding
+// the output pipes (so Wait gives up after waitDelay). The child must be
+// gone when the call returns and the scratch directory removed, so nothing
+// keeps running or writing after the call. The short grace only covers the
+// kernel tearing down a SIGKILLed process; without the kill the child lives
+// for 30s.
+func TestRunKillsLeftoverChildren(t *testing.T) {
+	tests := []struct {
+		id      string
+		wantErr string // "" = success
+	}{
+		{"fakeChildOk", ""},
+		{"fakeChildEr", "yt-dlp failed: [youtube] fakeChildEr: Requested format is not available"},
+		{"fakeChildPp", "yt-dlp failed: [youtube] fakeChildPp: Requested format is not available"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.id, func(t *testing.T) {
+			t.Parallel()
+			pidFile := filepath.Join(t.TempDir(), "child.pid")
+			r := newRunner(t)
+			r.extraEnv = []string{"FAKE_YTDLP_PID_FILE=" + pidFile}
+
+			_, _, err := r.Info(t.Context(), "https://www.youtube.com/watch?v="+tt.id)
+			switch {
+			case tt.wantErr == "" && err != nil:
+				t.Fatalf("Info: %v", err)
+			case tt.wantErr != "":
+				if e := wantKind(t, err, KindFailed); e.Msg != tt.wantErr {
+					t.Fatalf("message = %q, want %q", e.Msg, tt.wantErr)
+				}
+			}
+			requireGone(t, readPid(t, pidFile), 500*time.Millisecond)
+			if left, err := os.ReadDir(r.cfg.TempDir); err != nil || len(left) != 0 {
+				t.Fatalf("scratch directories left behind: %v (err %v)", left, err)
+			}
+		})
+	}
+}
+
 // readPid reads the child pid the fake recorded.
 func readPid(t *testing.T, path string) int {
 	t.Helper()

@@ -11,6 +11,11 @@
 # fakeFlood00 (floods stdout), fakeError00 (exits 1 with an ERROR line),
 # fakeNoise00 (floods stderr, then exits 1 with an ERROR line), fakeCount00
 # (records how many fakeCount00 runs overlap, then answers as vidNoSubs00).
+# The fakeChild ids leave a child process behind (its pid goes to
+# FAKE_YTDLP_PID_FILE), standing in for a JavaScript runtime that outlives
+# yt-dlp: fakeChildOk (child detached from stdio, answers as vidNoSubs00),
+# fakeChildEr (child detached from stdio, exits 1) and fakeChildPp (child
+# keeps the stdout/stderr pipes, exits 1).
 # If FAKE_YTDLP_ARGV_FILE is set, the argv is written there, one per line.
 set -eu
 
@@ -95,6 +100,23 @@ fakeCount00)
 	ls "$running" | wc -l >>"${FAKE_YTDLP_COUNT_LOG:?}"
 	rm -f "$running/$$"
 	id=vidNoSubs00
+	;;
+fakeChildOk)
+	sleep 30 </dev/null >/dev/null 2>&1 &
+	echo "$!" >"${FAKE_YTDLP_PID_FILE:?}"
+	id=vidNoSubs00
+	;;
+fakeChildEr)
+	sleep 30 </dev/null >/dev/null 2>&1 &
+	echo "$!" >"${FAKE_YTDLP_PID_FILE:?}"
+	echo "ERROR: [youtube] fakeChildEr: Requested format is not available" >&2
+	exit 1
+	;;
+fakeChildPp)
+	sleep 30 &
+	echo "$!" >"${FAKE_YTDLP_PID_FILE:?}"
+	echo "ERROR: [youtube] fakeChildPp: Requested format is not available" >&2
+	exit 1
 	;;
 esac
 
