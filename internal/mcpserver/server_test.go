@@ -256,13 +256,22 @@ func TestGetInfoErrors(t *testing.T) {
 func TestSSRFRejectedBeforeExec(t *testing.T) {
 	f := newFixture(t, "")
 	cases := map[string]string{
-		"http://169.254.169.254/latest/meta-data/":   "IP address",
-		"https://example.com/watch?v=dQw4w9WgXcQ":    `host "example.com" is not allowed; allowed hosts:`,
-		"file:///etc/passwd":                         `scheme "file" is not allowed`,
-		"https://www.youtube.com@10.0.0.1/":          "username or password",
-		"https://www.youtube.com:8080/watch?v=x":     "port 8080 is not allowed",
-		"ytsearch1:anything":                         "not an http(s) URL",
-		"https://www.youtube.com/playlist?list=PL12": "could not find a video id",
+		"http://169.254.169.254/latest/meta-data/":            "IP address",
+		"http://2130706433/":                                  "IP address",
+		"http://[::1]/":                                       "not a plain hostname",
+		"https://example.com/watch?v=dQw4w9WgXcQ":             `host "example.com" is not allowed; allowed hosts:`,
+		"HTTPS://EXAMPLE.COM/watch?v=dQw4w9WgXcQ":             `host "example.com" is not allowed`,
+		"https://www.youtube.com.evil.example/watch?v=x":      "is not allowed",
+		"https://www.youtube.com./watch?v=dQw4w9WgXcQ":        "ends with a dot",
+		"https://www.yоutube.com/watch?v=dQw4w9WgXcQ":         "not a plain hostname", // Cyrillic о
+		"https://%77ww.youtube.com/watch?v=dQw4w9WgXcQ":       "not a plain hostname",
+		"file:///etc/passwd":                                  `scheme "file" is not allowed`,
+		"https://www.youtube.com@10.0.0.1/":                   "username or password",
+		"https://www.youtube.com:8080/watch?v=x":              "port 8080 is not allowed",
+		"ytsearch1:anything":                                  "not an http(s) URL",
+		"--exec=id":                                           "not an http(s) URL",
+		"https://www.youtube.com/playlist?list=PL12":          "could not find a video id",
+		"https://www.youtube.com/watch?v=dQw4w9WgXcQ\n--exec": "whitespace",
 	}
 	for _, tool := range []string{"get_info", "list_subtitles", "get_transcript"} {
 		for in, want := range cases {

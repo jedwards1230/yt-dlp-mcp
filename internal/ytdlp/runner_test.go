@@ -3,6 +3,7 @@ package ytdlp
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"slices"
@@ -116,6 +117,168 @@ func TestArgvSafety(t *testing.T) {
 				t.Errorf("missing --skip-download: %q", args)
 			}
 		})
+	}
+}
+
+// TestReadOnlyFlags pins the flags that keep every yt-dlp run read-only and
+// self-contained, for every operation: nothing is downloaded, no config file,
+// plugin, cookie jar, browser profile or persistent cache is read, no remote
+// JavaScript component is fetched, and the generic "fetch any page" extractor
+// is off. Removing one of them from BaseArgs or an operation fails here.
+func TestReadOnlyFlags(t *testing.T) {
+	required := [][]string{
+		{"--ignore-config"},
+		{"--no-plugin-dirs"},
+		{"--no-remote-components"},
+		{"--use-extractors", "default,-generic"},
+		{"--no-cache-dir"},
+		{"--no-cookies"},
+		{"--no-cookies-from-browser"},
+		{"--skip-download"},
+	}
+	r := newRunner(t)
+	ops := []struct {
+		name string
+		run  func() error
+	}{
+		{"search", func() error { _, err := r.Search(t.Context(), "bookshelf", 1); return err }},
+		{"info", func() error { _, _, err := r.Info(t.Context(), manualURL); return err }},
+		{"subtitles", func() error { _, _, err := r.Subtitles(t.Context(), manualURL); return err }},
+		{"transcript", func() error { _, err := r.Transcript(t.Context(), manualURL, "en", SourceAny); return err }},
+	}
+	for _, op := range ops {
+		t.Run(op.name, func(t *testing.T) {
+			argv := recordArgv(t, r)
+			if err := op.run(); err != nil {
+				t.Fatalf("%s: %v", op.name, err)
+			}
+			args := argv()
+			flags := args[:len(args)-2] // everything before "--" and the target
+			for _, want := range required {
+				if !containsSeq(flags, want) {
+					t.Errorf("argv lacks %q: %q", want, args)
+				}
+			}
+			for _, banned := range []string{"--remote-components", "--cookies", "--cookies-from-browser", "--cache-dir", "--plugin-dirs", "--config-locations", "--exec", "--no-skip-download"} {
+				if slices.Contains(flags, banned) {
+					t.Errorf("argv contains %s: %q", banned, args)
+				}
+			}
+		})
+	}
+}
+
+// containsSeq reports whether seq appears in args as consecutive elements.
+func containsSeq(args, seq []string) bool {
+	for i := 0; i+len(seq) <= len(args); i++ {
+		if slices.Equal(args[i:i+len(seq)], seq) {
+			return true
+		}
+	}
+	return false
+}
+
+// TestNoShell proves user input never meets a shell: shell metacharacters in
+// a search query or a target arrive at yt-dlp as a single, byte-identical argv
+// element directly after "--", and the commands they spell never run.
+func TestNoShell(t *testing.T) {
+	marker := filepath.Join(t.TempDir(), "shell-ran")
+	payload := fmt.Sprintf("x; touch %[1]s && $(touch %[1]s) `touch %[1]s` | touch %[1]s > %[1]s '\"", marker)
+	r := newRunner(t)
+	tests := []struct {
+		name, wantTarget string
+		run              func() error
+	}{
+		{"search query", "ytsearch1:" + payload, func() error { _, err := r.Search(t.Context(), payload, 1); return err }},
+		{"target", "https://www.youtube.com/watch?v=" + payload, func() error {
+			_, _, err := r.Info(t.Context(), "https://www.youtube.com/watch?v="+payload)
+			return err
+		}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			argv := recordArgv(t, r)
+			_ = tt.run() // the fake has no fixture for the target; only argv matters
+			args := argv()
+			n := len(args)
+			if args[n-2] != "--" || args[n-1] != tt.wantTarget {
+				t.Fatalf("target was not passed verbatim after \"--\":\n got %q\nwant %q", args[n-2:], []string{"--", tt.wantTarget})
+			}
+			if _, err := os.Stat(marker); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("shell metacharacters were executed (marker stat err %v)", err)
+			}
+		})
+	}
+}
+
+// TestConcurrencyLimit starts more calls than there are slots against a fake
+// that records how many of its runs overlap, and checks the server never runs
+// more yt-dlp processes at once than YTDLP_MCP_MAX_CONCURRENCY allows (and
+// does run that many, so the limit is what bounds it).
+func TestConcurrencyLimit(t *testing.T) {
+	const slots, calls = 2, 6
+	running, countLog := t.TempDir(), filepath.Join(t.TempDir(), "counts")
+	r := newRunner(t, func(c *Config) { c.MaxConcurrency = slots })
+	r.extraEnv = []string{"FAKE_YTDLP_RUNNING_DIR=" + running, "FAKE_YTDLP_COUNT_LOG=" + countLog}
+
+	errs := make(chan error, calls)
+	for range calls {
+		go func() {
+			_, _, err := r.Info(t.Context(), "https://www.youtube.com/watch?v=fakeCount00")
+			errs <- err
+		}()
+	}
+	for range calls {
+		if err := <-errs; err != nil {
+			t.Fatalf("Info: %v", err)
+		}
+	}
+
+	data, err := os.ReadFile(countLog)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var peak, runs int
+	for _, f := range strings.Fields(string(data)) {
+		n, err := strconv.Atoi(f)
+		if err != nil {
+			t.Fatalf("count log %q: %v", data, err)
+		}
+		peak, runs = max(peak, n), runs+1
+	}
+	if runs != calls || peak != slots {
+		t.Fatalf("%d runs with a peak of %d concurrent, want %d runs peaking at exactly %d", runs, peak, calls, slots)
+	}
+}
+
+// TestStderrTailBounded floods stderr far past the kept tail: the call still
+// finishes (the pipe is drained, never blocks) and the error is the final
+// ERROR line.
+func TestStderrTailBounded(t *testing.T) {
+	r := newRunner(t)
+	_, _, err := r.Info(t.Context(), "https://www.youtube.com/watch?v=fakeNoise00")
+	e := wantKind(t, err, KindFailed)
+	if e.Msg != "yt-dlp failed: [youtube] fakeNoise00: Sign in to confirm you are not a bot" {
+		t.Fatalf("message = %q", e.Msg)
+	}
+	tb := &tailBuffer{limit: stderrTailBytes}
+	_, _ = tb.Write(make([]byte, 3*stderrTailBytes))
+	if n := len(tb.String()); n != stderrTailBytes {
+		t.Fatalf("tail buffer holds %d bytes, want %d", n, stderrTailBytes)
+	}
+}
+
+// TestSubtitleFileCap checks that a subtitle file larger than
+// YTDLP_MCP_MAX_OUTPUT_BYTES is refused rather than read into memory.
+func TestSubtitleFileCap(t *testing.T) {
+	r := newRunner(t, func(c *Config) { c.MaxOutputBytes = 4096 })
+	_, err := r.Transcript(t.Context(), "https://www.youtube.com/watch?v=vidBigSubs0", "en", SourceAny)
+	e := wantKind(t, err, KindOutputLimit)
+	if !strings.Contains(e.Msg, "the en subtitle track is 8297 bytes, larger than the 4096-byte limit (YTDLP_MCP_MAX_OUTPUT_BYTES)") {
+		t.Fatalf("message = %q", e.Msg)
+	}
+	if got, err := newRunner(t).Transcript(t.Context(), "https://www.youtube.com/watch?v=vidBigSubs0", "en", SourceAny); err != nil || len(got.Data) != 8297 {
+		t.Fatalf("under the default test cap: %d bytes, %v", len(got.Data), err)
 	}
 }
 

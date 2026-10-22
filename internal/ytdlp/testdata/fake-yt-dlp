@@ -8,7 +8,9 @@
 #   -- TARGET                      ytsearchN:QUERY or a watch?v=<id> URL
 # Fixture data lives in videos/<id>/ next to this script. Special ids exercise
 # failure paths: fakeSlow000 (hangs), fakeOrphan0 (hangs with a child process),
-# fakeFlood00 (floods stdout), fakeError00 (exits 1 with an ERROR line).
+# fakeFlood00 (floods stdout), fakeError00 (exits 1 with an ERROR line),
+# fakeNoise00 (floods stderr, then exits 1 with an ERROR line), fakeCount00
+# (records how many fakeCount00 runs overlap, then answers as vidNoSubs00).
 # If FAKE_YTDLP_ARGV_FILE is set, the argv is written there, one per line.
 set -eu
 
@@ -77,6 +79,22 @@ fakeError00)
 	echo "WARNING: [youtube] fakeError00: a harmless warning" >&2
 	echo "ERROR: [youtube] fakeError00: Video unavailable. This video is private" >&2
 	exit 1
+	;;
+fakeNoise00)
+	head -c 1048576 /dev/zero | tr '\0' 'w' >&2
+	echo >&2
+	echo "ERROR: [youtube] fakeNoise00: Sign in to confirm you are not a bot" >&2
+	exit 1
+	;;
+fakeCount00)
+	# Register in the shared directory, wait long enough for every run the
+	# server lets through to start, log how many are registered, deregister.
+	running=${FAKE_YTDLP_RUNNING_DIR:?}
+	: >"$running/$$"
+	sleep 0.5
+	ls "$running" | wc -l >>"${FAKE_YTDLP_COUNT_LOG:?}"
+	rm -f "$running/$$"
+	id=vidNoSubs00
 	;;
 esac
 
