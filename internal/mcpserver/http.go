@@ -2,6 +2,7 @@ package mcpserver
 
 import (
 	"context"
+	"crypto/sha256"
 	"crypto/subtle"
 	"errors"
 	"fmt"
@@ -9,6 +10,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -58,12 +60,16 @@ func NewHandler(srv *mcp.Server, authToken string, log *slog.Logger) http.Handle
 	return mux
 }
 
-// bearerAuth compares the whole Authorization header in constant time
-// against the expected value. The token is never logged or echoed.
+// bearerAuth admits a request whose Authorization header carries token
+// under the Bearer scheme (matched case-insensitively, RFC 9110 section
+// 11.1). The presented and expected tokens are compared as SHA-256 digests in
+// constant time, so neither the comparison's duration nor its early exit on
+// a length mismatch reveals anything about the token. The token is never
+// logged or echoed.
 func bearerAuth(token string, next http.Handler, log *slog.Logger) http.Handler {
-	expected := []byte("Bearer " + token)
+	expected := sha256.Sum256([]byte(token))
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if subtle.ConstantTimeCompare([]byte(r.Header.Get("Authorization")), expected) != 1 {
+		if !validBearer(r.Header.Get("Authorization"), expected) {
 			log.Debug("rejected unauthenticated MCP request", "remote", r.RemoteAddr)
 			w.Header().Set("WWW-Authenticate", `Bearer realm="yt-dlp-mcp", error="invalid_token"`)
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
@@ -71,6 +77,18 @@ func bearerAuth(token string, next http.Handler, log *slog.Logger) http.Handler 
 		}
 		next.ServeHTTP(w, r)
 	})
+}
+
+// validBearer reports whether header is "Bearer <token>" for the token
+// whose digest is expected. The scheme name is case-insensitive and may be
+// followed by more than one space; the token itself is compared exactly.
+func validBearer(header string, expected [sha256.Size]byte) bool {
+	scheme, presented, ok := strings.Cut(header, " ")
+	if !ok || !strings.EqualFold(scheme, "Bearer") {
+		return false
+	}
+	got := sha256.Sum256([]byte(strings.TrimLeft(presented, " ")))
+	return subtle.ConstantTimeCompare(got[:], expected[:]) == 1
 }
 
 // NewHTTPServer returns the http.Server for h. WriteTimeout is deliberately

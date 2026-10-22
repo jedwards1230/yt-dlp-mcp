@@ -2,6 +2,7 @@ package mcpserver
 
 import (
 	"context"
+	"crypto/sha256"
 	"io"
 	"log/slog"
 	"net"
@@ -89,17 +90,28 @@ func TestBearerAuth(t *testing.T) {
 	ts := httptest.NewServer(NewHandler(stubServer(t, &stubBackend{}), token, nil))
 	defer ts.Close()
 
-	for name, header := range map[string]string{
-		"missing":      "",
-		"wrong token":  "Bearer nope",
-		"wrong scheme": "Basic " + token,
-		"bare token":   token,
-		"prefix only":  "Bearer " + token[:4],
+	for _, tt := range []struct {
+		name, header string
+		allowed      bool
+	}{
+		{"missing", "", false},
+		{"wrong token", "Bearer nope", false},
+		{"wrong scheme", "Basic " + token, false},
+		{"bare token", token, false},
+		{"prefix only", "Bearer " + token[:4], false},
+		{"token plus suffix", "Bearer " + token + "x", false},
+		{"token plus extra word", "Bearer " + token + " extra", false},
+		{"no space after scheme", "Bearer" + token, false},
+		{"scheme only", "Bearer", false},
+		{"exact", "Bearer " + token, true},
+		{"lowercase scheme", "bearer " + token, true},
+		{"uppercase scheme", "BEARER " + token, true},
+		{"two spaces", "Bearer  " + token, true},
 	} {
-		t.Run(name, func(t *testing.T) {
+		t.Run(tt.name, func(t *testing.T) {
 			req, _ := http.NewRequestWithContext(t.Context(), http.MethodPost, ts.URL+MCPPath, strings.NewReader(`{}`))
-			if header != "" {
-				req.Header.Set("Authorization", header)
+			if tt.header != "" {
+				req.Header.Set("Authorization", tt.header)
 			}
 			resp, err := http.DefaultClient.Do(req)
 			if err != nil {
@@ -107,6 +119,14 @@ func TestBearerAuth(t *testing.T) {
 			}
 			body, _ := io.ReadAll(resp.Body)
 			_ = resp.Body.Close()
+			if tt.allowed {
+				// Past auth, the SDK judges the (deliberately incomplete)
+				// request; anything but 401 means the token was accepted.
+				if resp.StatusCode == http.StatusUnauthorized || resp.Header.Get("WWW-Authenticate") != "" {
+					t.Fatalf("valid credentials rejected: status %d", resp.StatusCode)
+				}
+				return
+			}
 			if resp.StatusCode != http.StatusUnauthorized || !strings.HasPrefix(resp.Header.Get("WWW-Authenticate"), "Bearer") {
 				t.Fatalf("status %d, WWW-Authenticate %q", resp.StatusCode, resp.Header.Get("WWW-Authenticate"))
 			}
@@ -131,6 +151,33 @@ func TestBearerAuth(t *testing.T) {
 	defer func() { _ = s.Close() }()
 	if _, err := s.ListTools(t.Context(), nil); err != nil {
 		t.Fatalf("ListTools: %v", err)
+	}
+}
+
+// TestValidBearer pins the header parsing: the scheme is matched without
+// regard to case, the token exactly, and a token of a different length is
+// rejected like any other mismatch (both sides are compared as digests).
+func TestValidBearer(t *testing.T) {
+	expected := sha256.Sum256([]byte("s3cret"))
+	for header, want := range map[string]bool{
+		"Bearer s3cret":   true,
+		"bearer s3cret":   true,
+		"bEaReR s3cret":   true,
+		"Bearer   s3cret": true,
+		"Bearer S3CRET":   false,
+		"Bearer s3cre":    false,
+		"Bearer s3crets":  false,
+		"Bearer s3cret ":  false,
+		"Bearer ":         false,
+		"Bearer":          false,
+		"Bearers3cret":    false,
+		"Basic s3cret":    false,
+		"s3cret":          false,
+		"":                false,
+	} {
+		if got := validBearer(header, expected); got != want {
+			t.Errorf("validBearer(%q) = %v, want %v", header, got, want)
+		}
 	}
 }
 
