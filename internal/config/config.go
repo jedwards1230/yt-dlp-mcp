@@ -87,7 +87,7 @@ func Load(args []string, getenv func(string) string, stderr io.Writer) (Config, 
 	addr := fs.String("addr", envOr(EnvAddr, DefaultAddr), "listen address ("+EnvAddr+")")
 	ytdlpPath := fs.String("yt-dlp-path", envOr(EnvYTDLPPath, DefaultYTDLPPath), "yt-dlp executable ("+EnvYTDLPPath+")")
 	hosts := fs.String("allowed-hosts", envOr(EnvAllowedHosts, strings.Join(urlguard.DefaultHosts, ",")), "comma-separated exact hostnames tools may fetch ("+EnvAllowedHosts+")")
-	timeout := fs.String("timeout", envOr(EnvTimeout, DefaultTimeout.String()), "per-call yt-dlp timeout, Go duration ("+EnvTimeout+")")
+	timeout := fs.String("timeout", envOr(EnvTimeout, DefaultTimeout.String()), "deadline for one tool call, slot wait plus yt-dlp run, Go duration ("+EnvTimeout+")")
 	maxOut := fs.String("max-output-bytes", envOr(EnvMaxOutputBytes, strconv.Itoa(DefaultMaxOutputBytes)), "cap on yt-dlp stdout and subtitle file size, bytes ("+EnvMaxOutputBytes+")")
 	maxConc := fs.String("max-concurrency", envOr(EnvMaxConcurrency, strconv.Itoa(DefaultMaxConcurrency)), "concurrent yt-dlp processes ("+EnvMaxConcurrency+")")
 	logLevel := fs.String("log-level", envOr(EnvLogLevel, "info"), "debug, info, warn or error ("+EnvLogLevel+")")

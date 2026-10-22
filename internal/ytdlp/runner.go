@@ -13,8 +13,10 @@
 //     there) that is removed when the call returns;
 //   - a sanitized environment that passes through only PATH, locale, TLS and
 //     proxy variables, so server secrets never reach the child;
-//   - a per-call timeout and a stdout byte cap, both enforced by killing the
-//     whole process group (yt-dlp and any JavaScript runtime it spawned);
+//   - a per-call deadline and a stdout byte cap, both enforced by killing the
+//     whole process group (yt-dlp and any JavaScript runtime it spawned); the
+//     deadline covers the wait for a concurrency slot as well as the run, so
+//     no call outlives the configured timeout;
 //   - a global concurrency limit shared by all tools.
 package ytdlp
 
@@ -68,8 +70,8 @@ var passthroughEnv = []string{
 type Config struct {
 	// Path is the yt-dlp executable (a name looked up on PATH, or a path).
 	Path string
-	// Timeout bounds each invocation, and also how long a call may wait for
-	// a free concurrency slot.
+	// Timeout bounds each call end to end: the wait for a free concurrency
+	// slot plus the yt-dlp run share one deadline.
 	Timeout time.Duration
 	// MaxOutputBytes caps yt-dlp's stdout and the size of a subtitle file
 	// read back from disk.
@@ -169,11 +171,20 @@ func (r *Runner) Version(ctx context.Context) (string, error) {
 // and target, inside a fresh scratch directory. On a zero exit it calls
 // collect with that directory and the captured stdout before the directory
 // is removed.
+//
+// One deadline of cfg.Timeout covers the whole call: waiting for a
+// concurrency slot, running yt-dlp and collecting its output. A call that
+// queued for a slot therefore has correspondingly less time to run.
 func (r *Runner) run(ctx context.Context, op string, build func(dir string) []string, target string, collect func(dir string, stdout []byte) error) error {
-	if err := r.acquire(ctx); err != nil {
+	timeoutCtx, cancelTimeout := context.WithTimeoutCause(ctx, r.cfg.Timeout, errTimeout)
+	defer cancelTimeout()
+
+	queued := time.Now()
+	if err := r.acquire(ctx, timeoutCtx); err != nil {
 		return err
 	}
 	defer func() { <-r.sem }()
+	waited := time.Since(queued)
 
 	dir, err := os.MkdirTemp(r.cfg.TempDir, "yt-dlp-mcp-*")
 	if err != nil {
@@ -185,8 +196,6 @@ func (r *Runner) run(ctx context.Context, op string, build func(dir string) []st
 		}
 	}()
 
-	timeoutCtx, cancelTimeout := context.WithTimeoutCause(ctx, r.cfg.Timeout, errTimeout)
-	defer cancelTimeout()
 	runCtx, cancel := context.WithCancelCause(timeoutCtx)
 	defer cancel(nil)
 
@@ -207,7 +216,7 @@ func (r *Runner) run(ctx context.Context, op string, build func(dir string) []st
 	setProcessGroup(cmd)
 	cmd.WaitDelay = waitDelay
 
-	r.log.Debug("running yt-dlp", "op", op, "args", args)
+	r.log.Debug("running yt-dlp", "op", op, "args", args, "slot_wait_ms", waited.Milliseconds())
 	start := time.Now()
 	runErr := cmd.Run()
 	elapsed := time.Since(start)
@@ -217,7 +226,7 @@ func (r *Runner) run(ctx context.Context, op string, build func(dir string) []st
 		_ = killGroup(cmd)
 		runErr = nil
 	}
-	if err := r.classify(ctx, runCtx, runErr, stdout, stderr); err != nil {
+	if err := r.classify(ctx, runCtx, runErr, waited, stdout, stderr); err != nil {
 		r.log.Info("yt-dlp failed", "op", op, "duration_ms", elapsed.Milliseconds(), "error", err.Error())
 		return err
 	}
@@ -227,8 +236,10 @@ func (r *Runner) run(ctx context.Context, op string, build func(dir string) []st
 
 // classify turns the outcome of cmd.Run into an *Error, or nil on success.
 // Context causes are checked before the exit status: a killed process exits
-// non-zero, but the useful message is why it was killed.
-func (r *Runner) classify(parent, runCtx context.Context, runErr error, stdout *capBuffer, stderr *tailBuffer) error {
+// non-zero, but the useful message is why it was killed. waited is how long
+// the call queued for a slot, which a timeout message reports when it ate a
+// noticeable part of the deadline.
+func (r *Runner) classify(parent, runCtx context.Context, runErr error, waited time.Duration, stdout *capBuffer, stderr *tailBuffer) error {
 	if stdout.overflowed() || errors.Is(context.Cause(runCtx), errOutputLimit) {
 		return &Error{Kind: KindOutputLimit, Msg: fmt.Sprintf("yt-dlp output exceeded the %d-byte limit (YTDLP_MCP_MAX_OUTPUT_BYTES) and was stopped", r.cfg.MaxOutputBytes)}
 	}
@@ -236,6 +247,9 @@ func (r *Runner) classify(parent, runCtx context.Context, runErr error, stdout *
 		return &Error{Kind: KindCanceled, Msg: "the request was canceled before yt-dlp finished", Err: parent.Err()}
 	}
 	if errors.Is(context.Cause(runCtx), errTimeout) {
+		if waited >= time.Second {
+			return &Error{Kind: KindTimeout, Msg: fmt.Sprintf("yt-dlp timed out after %s (YTDLP_MCP_TIMEOUT), %s of it waiting for a free yt-dlp slot (YTDLP_MCP_MAX_CONCURRENCY); the server is busy — retry shortly", r.cfg.Timeout, waited.Round(time.Second)), Err: errTimeout}
+		}
 		return &Error{Kind: KindTimeout, Msg: fmt.Sprintf("yt-dlp timed out after %s (YTDLP_MCP_TIMEOUT); the site may be slow or blocking requests — retry later", r.cfg.Timeout), Err: errTimeout}
 	}
 	if runErr == nil {
@@ -252,21 +266,21 @@ func (r *Runner) classify(parent, runCtx context.Context, runErr error, stdout *
 	return &Error{Kind: KindFailed, Msg: fmt.Sprintf("running yt-dlp: %v", runErr), Err: runErr}
 }
 
-// acquire takes a concurrency slot, waiting at most the configured timeout.
-func (r *Runner) acquire(ctx context.Context) error {
+// acquire takes a concurrency slot, waiting until deadline (the call's
+// timeout context, derived from parent) is done.
+func (r *Runner) acquire(parent, deadline context.Context) error {
 	select {
 	case r.sem <- struct{}{}:
 		return nil
 	default:
 	}
-	t := time.NewTimer(r.cfg.Timeout)
-	defer t.Stop()
 	select {
 	case r.sem <- struct{}{}:
 		return nil
-	case <-ctx.Done():
-		return &Error{Kind: KindCanceled, Msg: "the request was canceled while waiting for a free yt-dlp slot", Err: ctx.Err()}
-	case <-t.C:
+	case <-deadline.Done():
+		if err := parent.Err(); err != nil {
+			return &Error{Kind: KindCanceled, Msg: "the request was canceled while waiting for a free yt-dlp slot", Err: err}
+		}
 		return &Error{Kind: KindBusy, Msg: fmt.Sprintf("server busy: all %d yt-dlp slots (YTDLP_MCP_MAX_CONCURRENCY) stayed in use for %s; retry shortly", cap(r.sem), r.cfg.Timeout)}
 	}
 }

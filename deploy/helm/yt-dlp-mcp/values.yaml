@@ -20,7 +20,9 @@ config:
   # www.youtube-nocookie.com. YouTube inputs are always fetched from
   # www.youtube.com, so keep it listed if you override this.
   allowedHosts: []
-  # Per-call yt-dlp timeout, Go duration (YTDLP_MCP_TIMEOUT).
+  # Deadline for one tool call, Go duration (YTDLP_MCP_TIMEOUT). It covers
+  # waiting for a free yt-dlp slot as well as the run itself, so a call never
+  # takes longer than this. Keep it below any timeout of a gateway in front.
   timeout: 60s
   # Cap on yt-dlp stdout and on a subtitle file read back, in bytes
   # (YTDLP_MCP_MAX_OUTPUT_BYTES).

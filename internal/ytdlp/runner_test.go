@@ -359,6 +359,30 @@ func TestBusy(t *testing.T) {
 	}
 }
 
+// TestTimeoutCoversSlotWait proves YTDLP_MCP_TIMEOUT bounds a whole call, not
+// each phase: a call that queues for a slot and then runs a hanging yt-dlp
+// still returns at the one deadline (not wait + timeout), and says how much
+// of it went to waiting.
+func TestTimeoutCoversSlotWait(t *testing.T) {
+	const timeout, held = 1500 * time.Millisecond, 1100 * time.Millisecond
+	r := newRunner(t, func(c *Config) { c.MaxConcurrency = 1; c.Timeout = timeout })
+	r.sem <- struct{}{}                      // another call holds the only slot...
+	time.AfterFunc(held, func() { <-r.sem }) // ...and finishes after held
+
+	start := time.Now()
+	_, _, err := r.Info(t.Context(), "https://www.youtube.com/watch?v=fakeSlow000")
+	elapsed := time.Since(start)
+
+	e := wantKind(t, err, KindTimeout)
+	if want := "yt-dlp timed out after 1.5s (YTDLP_MCP_TIMEOUT), 1s of it waiting for a free yt-dlp slot (YTDLP_MCP_MAX_CONCURRENCY)"; !strings.HasPrefix(e.Msg, want) {
+		t.Fatalf("message = %q, want prefix %q", e.Msg, want)
+	}
+	// The old behavior (wait, then a fresh timeout) would take held+timeout.
+	if elapsed < timeout || elapsed > timeout+500*time.Millisecond {
+		t.Fatalf("call took %s; the deadline is %s for slot wait and run together", elapsed, timeout)
+	}
+}
+
 func TestStartFailure(t *testing.T) {
 	r := newRunner(t, func(c *Config) { c.Path = filepath.Join(t.TempDir(), "no-such-yt-dlp") })
 	_, _, err := r.Info(t.Context(), manualURL)
