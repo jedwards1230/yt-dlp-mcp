@@ -2,6 +2,8 @@ package transcript
 
 import (
 	"flag"
+	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"slices"
@@ -244,6 +246,62 @@ func TestParseErrors(t *testing.T) {
 	}
 	if segs, err := Parse([]byte("WEBVTT\n\nnot a cue\n"), FormatVTT); err != nil || len(segs) != 0 {
 		t.Errorf("cue-less vtt = %v, %v", segs, err)
+	}
+}
+
+func TestFormatTimestamp(t *testing.T) {
+	for _, tt := range []struct {
+		in   time.Duration
+		want string
+	}{
+		{0, "00:00"},
+		{59*time.Second + 900*time.Millisecond, "00:59"},
+		{65 * time.Second, "01:05"},
+		{2 * time.Hour, "02:00:00"},
+		{-1500 * time.Millisecond, "00:00"},
+		{-2 * time.Hour, "00:00"},
+		{math.MinInt64, "00:00"},
+		{math.MaxInt64, "2562047:47:16"},
+	} {
+		if got := FormatTimestamp(tt.in); got != tt.want {
+			t.Errorf("FormatTimestamp(%d) = %q, want %q", tt.in, got, tt.want)
+		}
+	}
+}
+
+// TestStartTimesClamped feeds start times that are negative or too large
+// for a time.Duration: they become 0 instead of wrapping into nonsense, and
+// the cue text survives.
+func TestStartTimesClamped(t *testing.T) {
+	tests := []struct {
+		name   string
+		format Format
+		in     string
+		want   []time.Duration
+	}{
+		{"json3 negative and overflowing", FormatJSON3,
+			fmt.Sprintf(`{"events":[{"tStartMs":-1500,"segs":[{"utf8":"a"}]},{"tStartMs":%d,"segs":[{"utf8":"b"}]},{"tStartMs":%d,"segs":[{"utf8":"c"}]},{"tStartMs":2500,"segs":[{"utf8":"d"}]}]}`,
+				int64(math.MaxInt64), math.MaxInt64/int64(time.Millisecond)+1),
+			[]time.Duration{0, 0, 0, 2500 * time.Millisecond}},
+		{"vtt hour count past a Duration", FormatVTT,
+			"WEBVTT\n\n9999999:00:00.000 --> 9999999:00:01.000\na\n\n2562046:00:00.000 --> 2562046:00:01.000\nb\n",
+			[]time.Duration{0, 2562046 * time.Hour}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			segs, err := Parse([]byte(tt.in), tt.format)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(segs) != len(tt.want) {
+				t.Fatalf("got %d segments, want %d: %+v", len(segs), len(tt.want), segs)
+			}
+			for i, s := range segs {
+				if s.Start != tt.want[i] {
+					t.Errorf("segment %d (%q) starts at %d, want %d", i, s.Text, s.Start, tt.want[i])
+				}
+			}
+		})
 	}
 }
 

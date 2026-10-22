@@ -19,6 +19,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"html"
+	"math"
 	"regexp"
 	"strconv"
 	"strings"
@@ -85,9 +86,18 @@ func parseJSON3(data []byte) ([]Segment, error) {
 		if text == "" {
 			continue // aAppend line-break events are a lone "\n"
 		}
-		segs = append(segs, Segment{Start: time.Duration(ev.TStartMs) * time.Millisecond, Text: text})
+		segs = append(segs, Segment{Start: msToDuration(ev.TStartMs), Text: text})
 	}
 	return segs, nil
+}
+
+// msToDuration converts a json3 start time. A negative value, or one too
+// large for a time.Duration, is clamped to 0 instead of wrapping around.
+func msToDuration(ms int64) time.Duration {
+	if ms < 0 || ms > math.MaxInt64/int64(time.Millisecond) {
+		return 0
+	}
+	return time.Duration(ms) * time.Millisecond
 }
 
 var (
@@ -182,7 +192,13 @@ func parseCues(data []byte) []Segment {
 	return segs
 }
 
+// maxHours is the largest hour count a time.Duration holds with room for
+// the minutes and seconds that follow it.
+const maxHours = math.MaxInt64/int64(time.Hour) - 1
+
 // parseTimestamp accepts "hh:mm:ss.ttt", "mm:ss.ttt" and the SRT comma form.
+// An hour count too large for a time.Duration is clamped to 0, like an
+// out-of-range json3 start time, rather than wrapping around.
 func parseTimestamp(s string) (time.Duration, bool) {
 	s = strings.ReplaceAll(s, ",", ".")
 	parts := strings.Split(s, ":")
@@ -203,6 +219,9 @@ func parseTimestamp(s string) (time.Duration, bool) {
 	sec, err := strconv.ParseFloat(parts[1], 64)
 	if err != nil || sec < 0 || sec >= 60 {
 		return 0, false
+	}
+	if int64(h) > maxHours {
+		return 0, true
 	}
 	d := time.Duration(h)*time.Hour + time.Duration(m)*time.Minute + time.Duration(sec*float64(time.Second))
 	return d.Round(time.Millisecond), true

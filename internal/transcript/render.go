@@ -113,9 +113,10 @@ func Paginate(segs []Segment, offset, limit, maxChars int, timestamps bool) (Pag
 	}, nil
 }
 
-// FormatTimestamp renders d as "mm:ss", or "hh:mm:ss" from one hour on.
+// FormatTimestamp renders d as "mm:ss", or "hh:mm:ss" from one hour on. A
+// negative d renders as "00:00".
 func FormatTimestamp(d time.Duration) string {
-	sec := int64(d / time.Second)
+	sec := max(int64(d/time.Second), 0)
 	h, m, s := sec/3600, (sec/60)%60, sec%60
 	if h > 0 {
 		return fmt.Sprintf("%02d:%02d:%02d", h, m, s)
