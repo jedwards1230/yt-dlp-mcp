@@ -1,0 +1,837 @@
+package ytdlp
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"math/rand/v2"
+	"os"
+	"path/filepath"
+	"regexp"
+	"slices"
+	"strconv"
+	"strings"
+	"testing"
+	"time"
+)
+
+// fakePath is the testdata/fake-yt-dlp script (see its header for the
+// fixture ids it understands).
+func fakePath(t *testing.T) string {
+	t.Helper()
+	p, err := filepath.Abs(filepath.Join("testdata", "fake-yt-dlp"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return p
+}
+
+func newRunner(t *testing.T, mutate ...func(*Config)) *Runner {
+	t.Helper()
+	cfg := Config{
+		Path:           fakePath(t),
+		Timeout:        10 * time.Second,
+		MaxOutputBytes: 1 << 20,
+		MaxConcurrency: 2,
+		TempDir:        t.TempDir(),
+	}
+	for _, m := range mutate {
+		m(&cfg)
+	}
+	r, err := New(cfg)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	return r
+}
+
+// recordArgv makes the fake write its argv to a file and returns a reader.
+func recordArgv(t *testing.T, r *Runner) func() []string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "argv")
+	r.extraEnv = []string{"FAKE_YTDLP_ARGV_FILE=" + path}
+	return func() []string {
+		data, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("reading recorded argv: %v", err)
+		}
+		return strings.Split(strings.TrimSuffix(string(data), "\n"), "\n")
+	}
+}
+
+func wantKind(t *testing.T, err error, kind ErrorKind) *Error {
+	t.Helper()
+	var e *Error
+	if !errors.As(err, &e) {
+		t.Fatalf("error %v (%T) is not an *Error", err, err)
+	}
+	if e.Kind != kind {
+		t.Fatalf("error kind = %d (%q), want %d", e.Kind, e.Msg, kind)
+	}
+	return e
+}
+
+const manualURL = "https://www.youtube.com/watch?v=vidManual01"
+
+// TestArgvSafety pins the invocation contract: BaseArgs first, the target
+// last and directly after "--", and none of the flags that would widen what
+// yt-dlp may do.
+func TestArgvSafety(t *testing.T) {
+	r := newRunner(t)
+	ops := map[string]func() error{
+		"search": func() error { _, err := r.Search(t.Context(), "-x --exec id", 2); return err },
+		"info":   func() error { _, _, err := r.Info(t.Context(), manualURL); return err },
+		"subs":   func() error { _, _, err := r.Subtitles(t.Context(), manualURL); return err },
+		"transcript": func() error {
+			_, err := r.Transcript(t.Context(), manualURL, "en", SourceAny)
+			return err
+		},
+	}
+	for name, op := range ops {
+		t.Run(name, func(t *testing.T) {
+			argv := recordArgv(t, r)
+			if err := op(); err != nil {
+				t.Fatalf("op: %v", err)
+			}
+			args := argv()
+			if !slices.Equal(args[:len(BaseArgs)], BaseArgs) {
+				t.Fatalf("argv does not start with BaseArgs:\n%q", args)
+			}
+			n := len(args)
+			if args[n-2] != "--" {
+				t.Fatalf("second-to-last arg = %q, want \"--\" (argv %q)", args[n-2], args)
+			}
+			if slices.Index(args, "--") != n-2 {
+				t.Fatalf("\"--\" appears before the end: %q", args)
+			}
+			for _, banned := range []string{"--remote-components", "--cookies", "--cookies-from-browser", "--exec", "--plugin-dirs", "--config-locations", "--load-info-json", "--batch-file", "-a"} {
+				if slices.Contains(args[:n-1], banned) {
+					t.Errorf("argv contains %s: %q", banned, args)
+				}
+			}
+			if i := slices.Index(args, "--use-extractors"); i < 0 || args[i+1] != "default,-generic" {
+				t.Errorf("generic extractor not disabled: %q", args)
+			}
+			if name != "search" && !slices.Contains(args, "--no-playlist") {
+				t.Errorf("single-video op without --no-playlist: %q", args)
+			}
+			if !slices.Contains(args, "--skip-download") {
+				t.Errorf("missing --skip-download: %q", args)
+			}
+		})
+	}
+}
+
+// TestReadOnlyFlags pins the flags that keep every yt-dlp run read-only and
+// self-contained, for every operation: nothing is downloaded, no config file,
+// plugin, cookie jar, browser profile or persistent cache is read, no remote
+// JavaScript component is fetched, and the generic "fetch any page" extractor
+// is off. Removing one of them from BaseArgs or an operation fails here.
+func TestReadOnlyFlags(t *testing.T) {
+	required := [][]string{
+		{"--ignore-config"},
+		{"--no-plugin-dirs"},
+		{"--no-remote-components"},
+		{"--use-extractors", "default,-generic"},
+		{"--no-cache-dir"},
+		{"--no-cookies"},
+		{"--no-cookies-from-browser"},
+		{"--skip-download"},
+	}
+	r := newRunner(t)
+	ops := []struct {
+		name string
+		run  func() error
+	}{
+		{"search", func() error { _, err := r.Search(t.Context(), "bookshelf", 1); return err }},
+		{"info", func() error { _, _, err := r.Info(t.Context(), manualURL); return err }},
+		{"subtitles", func() error { _, _, err := r.Subtitles(t.Context(), manualURL); return err }},
+		{"transcript", func() error { _, err := r.Transcript(t.Context(), manualURL, "en", SourceAny); return err }},
+	}
+	for _, op := range ops {
+		t.Run(op.name, func(t *testing.T) {
+			argv := recordArgv(t, r)
+			if err := op.run(); err != nil {
+				t.Fatalf("%s: %v", op.name, err)
+			}
+			args := argv()
+			flags := args[:len(args)-2] // everything before "--" and the target
+			for _, want := range required {
+				if !containsSeq(flags, want) {
+					t.Errorf("argv lacks %q: %q", want, args)
+				}
+			}
+			for _, banned := range []string{"--remote-components", "--cookies", "--cookies-from-browser", "--cache-dir", "--plugin-dirs", "--config-locations", "--exec", "--no-skip-download"} {
+				if slices.Contains(flags, banned) {
+					t.Errorf("argv contains %s: %q", banned, args)
+				}
+			}
+		})
+	}
+}
+
+// containsSeq reports whether seq appears in args as consecutive elements.
+func containsSeq(args, seq []string) bool {
+	for i := 0; i+len(seq) <= len(args); i++ {
+		if slices.Equal(args[i:i+len(seq)], seq) {
+			return true
+		}
+	}
+	return false
+}
+
+// TestNoShell proves user input never meets a shell: shell metacharacters in
+// a search query or a target arrive at yt-dlp as a single, byte-identical argv
+// element directly after "--", and the commands they spell never run.
+func TestNoShell(t *testing.T) {
+	marker := filepath.Join(t.TempDir(), "shell-ran")
+	payload := fmt.Sprintf("x; touch %[1]s && $(touch %[1]s) `touch %[1]s` | touch %[1]s > %[1]s '\"", marker)
+	r := newRunner(t)
+	tests := []struct {
+		name, wantTarget string
+		run              func() error
+	}{
+		{"search query", "ytsearch1:" + payload, func() error { _, err := r.Search(t.Context(), payload, 1); return err }},
+		{"target", "https://www.youtube.com/watch?v=" + payload, func() error {
+			_, _, err := r.Info(t.Context(), "https://www.youtube.com/watch?v="+payload)
+			return err
+		}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			argv := recordArgv(t, r)
+			_ = tt.run() // the fake has no fixture for the target; only argv matters
+			args := argv()
+			n := len(args)
+			if args[n-2] != "--" || args[n-1] != tt.wantTarget {
+				t.Fatalf("target was not passed verbatim after \"--\":\n got %q\nwant %q", args[n-2:], []string{"--", tt.wantTarget})
+			}
+			if _, err := os.Stat(marker); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("shell metacharacters were executed (marker stat err %v)", err)
+			}
+		})
+	}
+}
+
+// TestConcurrencyLimit starts more calls than there are slots against a fake
+// that records how many of its runs overlap, and checks the server never runs
+// more yt-dlp processes at once than YTDLP_MCP_MAX_CONCURRENCY allows (and
+// does run that many, so the limit is what bounds it).
+func TestConcurrencyLimit(t *testing.T) {
+	const slots, calls = 2, 6
+	running, countLog := t.TempDir(), filepath.Join(t.TempDir(), "counts")
+	r := newRunner(t, func(c *Config) { c.MaxConcurrency = slots })
+	r.extraEnv = []string{"FAKE_YTDLP_RUNNING_DIR=" + running, "FAKE_YTDLP_COUNT_LOG=" + countLog}
+
+	errs := make(chan error, calls)
+	for range calls {
+		go func() {
+			_, _, err := r.Info(t.Context(), "https://www.youtube.com/watch?v=fakeCount00")
+			errs <- err
+		}()
+	}
+	for range calls {
+		if err := <-errs; err != nil {
+			t.Fatalf("Info: %v", err)
+		}
+	}
+
+	data, err := os.ReadFile(countLog)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var peak, runs int
+	for _, f := range strings.Fields(string(data)) {
+		n, err := strconv.Atoi(f)
+		if err != nil {
+			t.Fatalf("count log %q: %v", data, err)
+		}
+		peak, runs = max(peak, n), runs+1
+	}
+	if runs != calls || peak != slots {
+		t.Fatalf("%d runs with a peak of %d concurrent, want %d runs peaking at exactly %d", runs, peak, calls, slots)
+	}
+}
+
+// TestStderrTailBounded floods stderr far past the kept tail: the call still
+// finishes (the pipe is drained, never blocks) and the error is the final
+// ERROR line.
+func TestStderrTailBounded(t *testing.T) {
+	r := newRunner(t)
+	_, _, err := r.Info(t.Context(), "https://www.youtube.com/watch?v=fakeNoise00")
+	e := wantKind(t, err, KindFailed)
+	if e.Msg != "yt-dlp failed: [youtube] fakeNoise00: Sign in to confirm you are not a bot" {
+		t.Fatalf("message = %q", e.Msg)
+	}
+	tb := &tailBuffer{limit: stderrTailBytes}
+	_, _ = tb.Write(make([]byte, 3*stderrTailBytes))
+	if n := len(tb.String()); n != stderrTailBytes {
+		t.Fatalf("tail buffer holds %d bytes, want %d", n, stderrTailBytes)
+	}
+}
+
+// TestSubtitleFileCap checks that a subtitle file larger than
+// YTDLP_MCP_MAX_OUTPUT_BYTES is refused rather than read into memory.
+func TestSubtitleFileCap(t *testing.T) {
+	r := newRunner(t, func(c *Config) { c.MaxOutputBytes = 4096 })
+	_, err := r.Transcript(t.Context(), "https://www.youtube.com/watch?v=vidBigSubs0", "en", SourceAny)
+	e := wantKind(t, err, KindOutputLimit)
+	if !strings.Contains(e.Msg, "the en subtitle track is 8297 bytes, larger than the 4096-byte limit (YTDLP_MCP_MAX_OUTPUT_BYTES)") {
+		t.Fatalf("message = %q", e.Msg)
+	}
+	if got, err := newRunner(t).Transcript(t.Context(), "https://www.youtube.com/watch?v=vidBigSubs0", "en", SourceAny); err != nil || len(got.Data) != 8297 {
+		t.Fatalf("under the default test cap: %d bytes, %v", len(got.Data), err)
+	}
+}
+
+func TestSearch(t *testing.T) {
+	r := newRunner(t)
+	argv := recordArgv(t, r)
+	got, err := r.Search(t.Context(), "bookshelf build", 2)
+	if err != nil {
+		t.Fatalf("Search: %v", err)
+	}
+	if args := argv(); args[len(args)-1] != "ytsearch2:bookshelf build" || !slices.Contains(args, "--flat-playlist") {
+		t.Fatalf("search argv = %q", args)
+	}
+	if len(got) != 2 || got[0].ID != "vidManual01" || got[0].Channel != "Example Workshop" || *got[0].Duration != 754 || got[1].Title != "Estantería en una tarde" {
+		t.Fatalf("Search = %+v", got)
+	}
+	if _, err := r.Search(t.Context(), "fake-error", 1); err == nil {
+		t.Fatal("failing search returned no error")
+	} else if e := wantKind(t, err, KindFailed); e.Msg != "yt-dlp failed: [youtube:search] search failed" {
+		t.Fatalf("message = %q", e.Msg)
+	}
+}
+
+func TestInfo(t *testing.T) {
+	r := newRunner(t)
+	info, tracks, err := r.Info(t.Context(), manualURL)
+	if err != nil {
+		t.Fatalf("Info: %v", err)
+	}
+	if info.ID != "vidManual01" || info.UploadDate != "20240315" || len(info.Chapters) != 2 || info.Chapters[1].Title != "Assembly" || *info.ViewCount != 12345 || info.CommentCount != nil {
+		t.Fatalf("info = %+v", info)
+	}
+	if got := codes(tracks.Manual); !slices.Equal(got, []string{"en", "de"}) {
+		t.Fatalf("manual codes = %q", got)
+	}
+	if tracks.OriginalAutomatic() != "en-orig" {
+		t.Fatalf("original automatic = %q", tracks.OriginalAutomatic())
+	}
+
+	_, tracks, err = r.Info(t.Context(), "https://www.youtube.com/watch?v=vidNoSubs00")
+	if err != nil || tracks.Manual != nil || tracks.Automatic != nil {
+		t.Fatalf("no-subs video: tracks %+v err %v", tracks, err)
+	}
+}
+
+func TestSubtitlesNames(t *testing.T) {
+	r := newRunner(t)
+	_, tracks, err := r.Subtitles(t.Context(), manualURL)
+	if err != nil {
+		t.Fatalf("Subtitles: %v", err)
+	}
+	wantManual := []Track{{"en", "English"}, {"de", "German"}}
+	wantAuto := []Track{{"en", ""}, {"de", ""}, {"en-orig", "English (Original)"}, {"fr", "French"}}
+	if !slices.Equal(tracks.Manual, wantManual) || !slices.Equal(tracks.Automatic, wantAuto) {
+		t.Fatalf("tracks = %+v", tracks)
+	}
+}
+
+func TestZipTracksMisaligned(t *testing.T) {
+	got := zipTracks("en, fr", `[{"name": "English", "ext": "vtt"}]`)
+	if !slices.Equal(got, []Track{{"en", ""}, {"fr", ""}}) {
+		t.Fatalf("misaligned names were applied: %+v", got)
+	}
+	if zipTracks("NA", "") != nil || zipTracks("", "[]") != nil {
+		t.Fatal("empty key lines should yield no tracks")
+	}
+}
+
+func TestTranscript(t *testing.T) {
+	r := newRunner(t)
+	tests := []struct {
+		name, url, lang string
+		src             Source
+		wantFormat      string
+		wantAuto        bool
+		wantWrite       []string
+		wantNoWrite     string
+	}{
+		{"manual preferred", manualURL, "en", SourceAny, "json3", false, []string{"--write-subs", "--write-auto-subs"}, ""},
+		{"manual vtt", manualURL, "de", SourceManual, "vtt", false, []string{"--write-subs"}, "--write-auto-subs"},
+		{"forced auto", manualURL, "en", SourceAutomatic, "json3", true, []string{"--write-auto-subs"}, "--write-subs"},
+		{"auto fallback", "https://www.youtube.com/watch?v=vidAutoOnly", "es-orig", SourceAny, "vtt", true, nil, ""},
+		{"auto when manual is unsupported", "https://www.youtube.com/watch?v=vidTtmlAuto", "en", SourceAutomatic, "json3", true, []string{"--write-auto-subs"}, "--write-subs"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			argv := recordArgv(t, r)
+			got, err := r.Transcript(t.Context(), tt.url, tt.lang, tt.src)
+			if err != nil {
+				t.Fatalf("Transcript: %v", err)
+			}
+			if string(got.Format) != tt.wantFormat || got.Automatic != tt.wantAuto || got.Lang != tt.lang || len(got.Data) == 0 {
+				t.Fatalf("got format %q auto %v lang %q (%d bytes)", got.Format, got.Automatic, got.Lang, len(got.Data))
+			}
+			args := argv()
+			for _, w := range tt.wantWrite {
+				if !slices.Contains(args, w) {
+					t.Errorf("argv lacks %s: %q", w, args)
+				}
+			}
+			if tt.wantNoWrite != "" && slices.Contains(args, tt.wantNoWrite) {
+				t.Errorf("argv has %s: %q", tt.wantNoWrite, args)
+			}
+			// Unless only automatic captions are wanted, the run also asks for
+			// named manual tracks in lang ("en-eEY6OEpapPo").
+			wantSubLangs := tt.lang + "," + tt.lang + "-[A-Za-z0-9_-]{9}[A-Za-z0-9_-]*"
+			if tt.src == SourceAutomatic {
+				wantSubLangs = tt.lang
+			}
+			for _, pair := range [][2]string{{"--sub-langs", wantSubLangs}, {"--sub-format", "json3/vtt/srt"}, {"-o", "transcript"}} {
+				if i := slices.Index(args, pair[0]); i < 0 || args[i+1] != pair[1] {
+					t.Errorf("argv %s = ?, want %q: %q", pair[0], pair[1], args)
+				}
+			}
+			for _, f := range []string{"--no-simulate", "--skip-download"} {
+				if !slices.Contains(args, f) {
+					t.Errorf("argv lacks %s", f)
+				}
+			}
+			// The per-call scratch directory (-P) is gone once the call returns.
+			dir := args[slices.Index(args, "-P")+1]
+			if _, err := os.Stat(dir); !errors.Is(err, os.ErrNotExist) {
+				t.Errorf("scratch dir %s still exists (stat err %v)", dir, err)
+			}
+		})
+	}
+}
+
+// TestTranscriptNamedTracks pins which track a transcript comes from when
+// YouTube keys a named manual track "<lang>-<track id>": an exact manual
+// track wins, then a named one in lang (before automatic captions), while a
+// region variant such as en-GB is never taken for lang "en".
+func TestTranscriptNamedTracks(t *testing.T) {
+	const named, region, manual01 = "https://www.youtube.com/watch?v=vidNamedTrk", "https://www.youtube.com/watch?v=vidRegionGB", manualURL
+	r := newRunner(t)
+	tests := []struct {
+		name, url, lang string
+		src             Source
+		wantLang        string
+		wantAuto        bool
+		wantText        string
+	}{
+		{"named manual beats automatic", named, "en", SourceAny, "en-eEY6OEpapPo", false, "human English, named track"},
+		{"named manual with source manual", named, "en", SourceManual, "en-eEY6OEpapPo", false, "human English, named track"},
+		{"source auto skips named manual", named, "en", SourceAutomatic, "en", true, "machine english"},
+		{"named id with a leading hyphen", named, "fr", SourceAny, "fr--b_cDEFGHI", false, "français, pista nommée"},
+		{"named track requested directly", named, "es-y1SAwy5xd4g", SourceAny, "es-y1SAwy5xd4g", false, "español, pista con nombre"},
+		{"region track requested directly", named, "en-GB", SourceAny, "en-GB", false, "British English, region track"},
+		{"region is not a named track", region, "en", SourceAny, "en", true, "machine english"},
+		{"exact manual still wins", manual01, "en", SourceAny, "en", false, ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := r.Transcript(t.Context(), tt.url, tt.lang, tt.src)
+			if err != nil {
+				t.Fatalf("Transcript: %v", err)
+			}
+			if got.Lang != tt.wantLang || got.Automatic != tt.wantAuto {
+				t.Fatalf("got lang %q auto %v, want %q auto %v", got.Lang, got.Automatic, tt.wantLang, tt.wantAuto)
+			}
+			if tt.wantText != "" && !strings.Contains(string(got.Data), tt.wantText) {
+				t.Fatalf("data %q lacks %q", got.Data, tt.wantText)
+			}
+		})
+	}
+
+	_, err := r.Transcript(t.Context(), region, "en", SourceManual)
+	if e := wantKind(t, err, KindNoSubtitles); !strings.Contains(e.Msg, `no manual subtitles in language "en"; available manual: en-GB;`) {
+		t.Fatalf("message = %q", e.Msg)
+	}
+}
+
+func TestIsNamedTrack(t *testing.T) {
+	for _, tt := range []struct {
+		code, lang string
+		want       bool
+	}{
+		{"en-eEY6OEpapPo", "en", true},
+		{"en--b_cDEFGHI", "en", true},
+		{"en-GB-eEY6OEpapPo", "en", true}, // a named track in a region is still a named English track
+		{"zh-Hant-eEY6OEpapPo", "zh-Hant", true},
+		{"en-GB", "en", false},
+		{"en-orig", "en", false},
+		{"zh-Hant", "zh", false},
+		{"es-419", "es", false},
+		{"en-US-POSIX", "en", false}, // 8 characters after "en-"
+		{"en", "en", false},
+		{"fr-eEY6OEpapPo", "en", false},
+		{"english-track1", "en", false},
+		{"en-eEY6OEpa.Po", "en", false},
+	} {
+		if got := IsNamedTrack(tt.code, tt.lang); got != tt.want {
+			t.Errorf("IsNamedTrack(%q, %q) = %v, want %v", tt.code, tt.lang, got, tt.want)
+		}
+	}
+}
+
+// TestYouTubeKeysAccepted is a property test over the keys yt-dlp builds
+// for YouTube (vssId without its leading dot, "." turned into "-"): a
+// language code, "<code>-orig" for the original automatic track, and
+// "<code>-<11-character track id>" for a named manual track, the id drawn
+// from the base64url alphabet. Every such key must pass ValidateLang, and a
+// named key must be recognized as a named track of its language code and be
+// matched by the --sub-langs pattern the server sends for that code, the
+// way yt-dlp matches it (whole key, case-insensitively).
+func TestYouTubeKeysAccepted(t *testing.T) {
+	langs := []string{"en", "en-GB", "en-US", "es", "es-419", "pt-BR", "zh-Hans", "zh-Hant", "zh-TW", "fil", "iw", "yue", "sr-Latn", "ckb", "und", "de", "ja", "ar"}
+	const alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_"
+	rng := rand.New(rand.NewPCG(1, 2))
+	for _, lang := range langs {
+		for _, key := range []string{lang, lang + "-orig"} {
+			if err := ValidateLang(key); err != nil {
+				t.Errorf("ValidateLang(%q) = %v", key, err)
+			}
+			if IsNamedTrack(key, lang) {
+				t.Errorf("IsNamedTrack(%q, %q) = true", key, lang)
+			}
+		}
+		// yt-dlp splits --sub-langs on every comma before compiling each part.
+		parts := strings.Split(subLangs(lang, SourceAny), ",")
+		if len(parts) != 2 || parts[0] != lang {
+			t.Fatalf("--sub-langs for %q splits into %q, want [lang, pattern]", lang, parts)
+		}
+		pattern := regexp.MustCompile(`(?i)^(?:` + parts[1] + `)$`)
+		for range 500 {
+			id := make([]byte, 11)
+			for i := range id {
+				id[i] = alphabet[rng.IntN(len(alphabet))]
+			}
+			key := lang + "-" + string(id)
+			if err := ValidateLang(key); err != nil {
+				t.Fatalf("ValidateLang(%q) = %v", key, err)
+			}
+			if !IsNamedTrack(key, lang) || !pattern.MatchString(key) {
+				t.Fatalf("named key %q: IsNamedTrack %v, pattern match %v", key, IsNamedTrack(key, lang), pattern.MatchString(key))
+			}
+		}
+		if pattern.MatchString(lang+"-orig") || pattern.MatchString(lang+"-GB") {
+			t.Errorf("named-track pattern for %q matches a non-named key", lang)
+		}
+	}
+}
+
+func TestTranscriptErrors(t *testing.T) {
+	r := newRunner(t)
+	tests := []struct {
+		name, url, lang string
+		src             Source
+		kind            ErrorKind
+		wantMsg         string
+		notWant         string
+	}{
+		{"missing language", manualURL, "xx", SourceAny, KindNoSubtitles, `no subtitles in language "xx"; available manual: en, de; auto: en-orig, en, de, fr (call list_subtitles for names)`, ""},
+		{"missing manual", manualURL, "fr", SourceManual, KindNoSubtitles, `no manual subtitles in language "fr"; available manual: en, de;`, ""},
+		{"no tracks at all", "https://www.youtube.com/watch?v=vidNoSubs00", "en", SourceAny, KindNoSubtitles, "available manual: none; auto: none", "warned"},
+		{"unsupported format", "https://www.youtube.com/watch?v=vidTtmlOnly", "en", SourceAny, KindParse, `the en track is only available as "ttml", which this server cannot convert (supported: json3, vtt, srt)`, "retry"},
+		{"unsupported manual with automatic alternative", "https://www.youtube.com/watch?v=vidTtmlAuto", "en", SourceAny, KindParse,
+			`the en track is only available as "ttml", which this server cannot convert (supported: json3, vtt, srt); automatic captions exist in en, so retry with source="auto"`, ""},
+		{"forced manual with automatic alternative", "https://www.youtube.com/watch?v=vidTtmlAuto", "en", SourceManual, KindParse, `retry with source="auto"`, ""},
+		{"invalid lang regex", manualURL, "en.*", SourceAny, KindInvalid, "is not a subtitle language code", ""},
+		{"invalid lang list", manualURL, "en,all", SourceAny, KindInvalid, "is not a subtitle language code", ""},
+		{"invalid source", manualURL, "en", Source("both"), KindInvalid, "source \"both\"", ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := r.Transcript(t.Context(), tt.url, tt.lang, tt.src)
+			e := wantKind(t, err, tt.kind)
+			if !strings.Contains(e.Msg, tt.wantMsg) {
+				t.Fatalf("message = %q, want containing %q", e.Msg, tt.wantMsg)
+			}
+			if tt.notWant != "" && strings.Contains(e.Msg, tt.notWant) {
+				t.Fatalf("message = %q, want without %q", e.Msg, tt.notWant)
+			}
+		})
+	}
+}
+
+func TestSummarizeAutomaticCaps(t *testing.T) {
+	var tr Tracks
+	for i := range 20 {
+		tr.Automatic = append(tr.Automatic, Track{Code: "l" + strconv.Itoa(i)})
+	}
+	tr.Automatic = append(tr.Automatic, Track{Code: "en-orig"})
+	got := summarizeAutomatic(tr)
+	if !strings.HasPrefix(got, "en-orig, l0, l1") || !strings.HasSuffix(got, "(9 more)") {
+		t.Fatalf("summary = %q", got)
+	}
+}
+
+func TestValidateLang(t *testing.T) {
+	for _, ok := range []string{
+		"en", "pt-BR", "zh-Hans", "en-orig", "es-419", "fil", "sr-Latn-RS",
+		// YouTube named manual tracks: <languageCode>-<track id>, where the
+		// id may hold "-" or "_" anywhere.
+		"en-eEY6OEpapPo", "es-y1SAwy5xd4g", "zh-Hant-eEY6OEpapPo", "en--b_cDEFGHI", "en-abcdefghij-", "en-ab__cd--efg",
+		"live_chat", "en_US", "a-b-c-d-e",
+	} {
+		if err := ValidateLang(ok); err != nil {
+			t.Errorf("ValidateLang(%q) = %v", ok, err)
+		}
+	}
+	for _, bad := range []string{
+		"", "e", "-en", "-live_chat", "_en", "1en", "en,fr", "en,all", "all", "ALL", "All",
+		"en.*", ".*", "en$", "^en", "en|fr", "(en)", "[en]", "en+", "en?", "en{2}", `en\d`,
+		"en orig", "en\n", "énglish", "--exec=id", strings.Repeat("a", 65),
+	} {
+		if err := ValidateLang(bad); err == nil {
+			t.Errorf("ValidateLang(%q) accepted", bad)
+		}
+	}
+}
+
+// TestChildEnvSanitized proves server secrets never reach yt-dlp and that
+// HOME and the caches point into the per-call scratch directory.
+func TestChildEnvSanitized(t *testing.T) {
+	t.Setenv("YTDLP_MCP_AUTH_TOKEN", "super-secret")
+	t.Setenv("SOME_OTHER_SECRET", "also-secret")
+	t.Setenv("HTTPS_PROXY", "http://proxy.example:3128")
+	envFile := filepath.Join(t.TempDir(), "env")
+	r := newRunner(t)
+	r.extraEnv = []string{"FAKE_YTDLP_ENV_FILE=" + envFile}
+	if _, _, err := r.Info(t.Context(), manualURL); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(envFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	env := string(data)
+	for _, leaked := range []string{"super-secret", "also-secret", "YTDLP_MCP_AUTH_TOKEN"} {
+		if strings.Contains(env, leaked) {
+			t.Errorf("child environment contains %q", leaked)
+		}
+	}
+	for _, want := range []string{"HTTPS_PROXY=http://proxy.example:3128", "PYTHONUTF8=1", "HOME=" + r.cfg.TempDir, "DENO_DIR=" + r.cfg.TempDir, "XDG_CACHE_HOME=" + r.cfg.TempDir} {
+		if !strings.Contains(env, want) {
+			t.Errorf("child environment lacks %q", want)
+		}
+	}
+}
+
+func TestOutputCapStopsProcess(t *testing.T) {
+	r := newRunner(t, func(c *Config) { c.MaxOutputBytes = 64 << 10 })
+	start := time.Now()
+	_, _, err := r.Info(t.Context(), "https://www.youtube.com/watch?v=fakeFlood00")
+	e := wantKind(t, err, KindOutputLimit)
+	if !strings.Contains(e.Msg, "65536-byte limit") {
+		t.Fatalf("message = %q", e.Msg)
+	}
+	if elapsed := time.Since(start); elapsed > 5*time.Second {
+		t.Fatalf("output cap took %s to stop the process", elapsed)
+	}
+}
+
+func TestExitErrorMessage(t *testing.T) {
+	r := newRunner(t)
+	_, _, err := r.Info(t.Context(), "https://www.youtube.com/watch?v=fakeError00")
+	e := wantKind(t, err, KindFailed)
+	if e.Msg != "yt-dlp failed: [youtube] fakeError00: Video unavailable. This video is private" {
+		t.Fatalf("message = %q", e.Msg)
+	}
+}
+
+// TestUnavailableVideo mirrors the real yt-dlp under --ignore-no-formats-error
+// for a video it cannot load: exit status 0, a placeholder record with an
+// empty fulltitle and the reason as a warning. Every single-video operation
+// must turn that into an actionable error instead of empty metadata, while a
+// real video that merely drew warnings (a bot check) keeps its metadata.
+func TestUnavailableVideo(t *testing.T) {
+	r := newRunner(t)
+	ops := []struct {
+		name string
+		run  func(url string) error
+	}{
+		{"info", func(u string) error { _, _, err := r.Info(t.Context(), u); return err }},
+		{"subtitles", func(u string) error { _, _, err := r.Subtitles(t.Context(), u); return err }},
+		{"transcript", func(u string) error { _, err := r.Transcript(t.Context(), u, "en", SourceAny); return err }},
+	}
+	for _, op := range ops {
+		t.Run(op.name, func(t *testing.T) {
+			e := wantKind(t, op.run("https://www.youtube.com/watch?v=vidGone0000"), KindUnavailable)
+			if want := `video "vidGone0000" is unavailable: This video is unavailable`; e.Msg != want {
+				t.Fatalf("message = %q, want %q", e.Msg, want)
+			}
+			err := op.run("https://www.youtube.com/watch?v=vidWarned00")
+			if op.name == "transcript" {
+				// Real, but YouTube withheld its captions: the warning says why.
+				e := wantKind(t, err, KindNoSubtitles)
+				if want := `no subtitles in language "en"; available manual: none; auto: none (call list_subtitles for names); yt-dlp warned: Sign in to confirm you are not a bot. This helps protect our community.`; e.Msg != want {
+					t.Fatalf("message = %q, want %q", e.Msg, want)
+				}
+			} else if err != nil {
+				t.Fatalf("a real video with warnings failed: %v", err)
+			}
+		})
+	}
+}
+
+func TestDecodeInfoUnavailable(t *testing.T) {
+	tests := []struct {
+		line, wantErr string
+	}{
+		{`{"id": "x1", "title": "youtube video #x1", "fulltitle": ""}`, `video "x1" is unavailable: `},
+		{`{"id": "x1", "title": "youtube video #x1"}`, `video "x1" is unavailable: `},
+		{`{"title": "T", "fulltitle": "T", "channel": "C"}`, `the video is unavailable: `},
+		{`{"id": "x1", "title": "T", "fulltitle": "T"}`, ""},
+		{`{"id": "x1", "title": "youtube video #x1", "fulltitle": "", "channel": "C"}`, ""},
+		{`{"id": "x1", "title": "youtube video #x1", "fulltitle": "", "uploader": "U"}`, ""},
+	}
+	for _, tt := range tests {
+		var info VideoInfo
+		err := decodeInfo(tt.line, &info, "")
+		if tt.wantErr == "" {
+			if err != nil {
+				t.Errorf("decodeInfo(%s) = %v, want success", tt.line, err)
+			}
+			continue
+		}
+		if e := wantKind(t, err, KindUnavailable); !strings.HasPrefix(e.Msg, tt.wantErr) {
+			t.Errorf("decodeInfo(%s) = %q, want prefix %q", tt.line, e.Msg, tt.wantErr)
+		}
+	}
+}
+
+func TestUnavailableReason(t *testing.T) {
+	const fallback = "yt-dlp found no title, channel or other metadata for it; it may be private, removed or never have existed"
+	tests := []struct {
+		name, stderr, want string
+	}{
+		{"extractor warning", "WARNING: [youtube] This video is unavailable\nWARNING: No video formats found!\nWARNING: Requested format is not available\n", "This video is unavailable"},
+		{"last extractor warning wins", "WARNING: [youtube] No title found in player responses\nWARNING: [youtube] Video unavailable. This video is private\n", "Video unavailable. This video is private"},
+		{"error beats warnings", "WARNING: [youtube] something\nERROR: [youtube] abc123: Private video\nWARNING: [youtube] later\n", "Private video"},
+		{"untagged error", "ERROR: Unable to download webpage: timed out\n", "Unable to download webpage: timed out"},
+		{"id prefix removed", "WARNING: [youtube] abc123: This video has been removed\n", "This video has been removed"},
+		{"no reason", "WARNING: No video formats found!\n", fallback},
+		{"empty", "", fallback},
+		{"generic warnings only", "WARNING: Requested format is not available\n", fallback},
+		{"long reason truncated", "WARNING: [youtube] " + strings.Repeat("é", 400) + "\n", strings.Repeat("é", 300) + "…"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := unavailableReason(tt.stderr, "abc123"); got != tt.want {
+				t.Fatalf("unavailableReason = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestCanceled(t *testing.T) {
+	r := newRunner(t)
+	ctx, cancel := context.WithCancel(t.Context())
+	time.AfterFunc(300*time.Millisecond, cancel)
+	_, _, err := r.Info(ctx, "https://www.youtube.com/watch?v=fakeSlow000")
+	_ = wantKind(t, err, KindCanceled)
+}
+
+func TestBusy(t *testing.T) {
+	r := newRunner(t, func(c *Config) { c.MaxConcurrency = 1; c.Timeout = 200 * time.Millisecond })
+	r.sem <- struct{}{} // occupy the only slot
+	defer func() { <-r.sem }()
+	_, _, err := r.Info(t.Context(), manualURL)
+	e := wantKind(t, err, KindBusy)
+	if !strings.Contains(e.Msg, "all 1 yt-dlp slots") {
+		t.Fatalf("message = %q", e.Msg)
+	}
+}
+
+// TestTimeoutCoversSlotWait proves YTDLP_MCP_TIMEOUT bounds a whole call, not
+// each phase: a call that queues for a slot and then runs a hanging yt-dlp
+// still returns at the one deadline (not wait + timeout), and says how much
+// of it went to waiting.
+func TestTimeoutCoversSlotWait(t *testing.T) {
+	const timeout, held = 1500 * time.Millisecond, 1100 * time.Millisecond
+	r := newRunner(t, func(c *Config) { c.MaxConcurrency = 1; c.Timeout = timeout })
+	r.sem <- struct{}{}                      // another call holds the only slot...
+	time.AfterFunc(held, func() { <-r.sem }) // ...and finishes after held
+
+	start := time.Now()
+	_, _, err := r.Info(t.Context(), "https://www.youtube.com/watch?v=fakeSlow000")
+	elapsed := time.Since(start)
+
+	e := wantKind(t, err, KindTimeout)
+	if want := "yt-dlp timed out after 1.5s (YTDLP_MCP_TIMEOUT), 1s of it waiting for a free yt-dlp slot (YTDLP_MCP_MAX_CONCURRENCY)"; !strings.HasPrefix(e.Msg, want) {
+		t.Fatalf("message = %q, want prefix %q", e.Msg, want)
+	}
+	// The old behavior (wait, then a fresh timeout) would take held+timeout.
+	if elapsed < timeout || elapsed > timeout+500*time.Millisecond {
+		t.Fatalf("call took %s; the deadline is %s for slot wait and run together", elapsed, timeout)
+	}
+}
+
+func TestStartFailure(t *testing.T) {
+	r := newRunner(t, func(c *Config) { c.Path = filepath.Join(t.TempDir(), "no-such-yt-dlp") })
+	_, _, err := r.Info(t.Context(), manualURL)
+	e := wantKind(t, err, KindStart)
+	if !strings.Contains(e.Msg, "could not start yt-dlp") {
+		t.Fatalf("message = %q", e.Msg)
+	}
+}
+
+func TestVersion(t *testing.T) {
+	v, err := newRunner(t).Version(t.Context())
+	if err != nil || v != "2026.10.21-fake" {
+		t.Fatalf("Version = %q, %v", v, err)
+	}
+}
+
+func TestNewValidates(t *testing.T) {
+	base := Config{Path: "yt-dlp", Timeout: time.Second, MaxOutputBytes: 1, MaxConcurrency: 1}
+	for name, mutate := range map[string]func(*Config){
+		"path":        func(c *Config) { c.Path = "" },
+		"timeout":     func(c *Config) { c.Timeout = 0 },
+		"output":      func(c *Config) { c.MaxOutputBytes = 0 },
+		"concurrency": func(c *Config) { c.MaxConcurrency = 0 },
+	} {
+		cfg := base
+		mutate(&cfg)
+		if _, err := New(cfg); err == nil {
+			t.Errorf("%s: New accepted %+v", name, cfg)
+		}
+	}
+}
+
+func TestBuffers(t *testing.T) {
+	var fired int
+	c := &capBuffer{limit: 5, onOverflow: func() { fired++ }}
+	_, _ = c.Write([]byte("abc"))
+	_, _ = c.Write([]byte("defg"))
+	_, _ = c.Write([]byte("hij"))
+	if c.buf.String() != "abcde" || !c.overflowed() || fired != 1 {
+		t.Fatalf("capBuffer = %q overflowed=%v fired=%d", c.buf.String(), c.overflowed(), fired)
+	}
+
+	tb := &tailBuffer{limit: 4}
+	_, _ = tb.Write([]byte("abc"))
+	_, _ = tb.Write([]byte("defg"))
+	if tb.String() != "defg" {
+		t.Fatalf("tailBuffer = %q", tb.String())
+	}
+}
+
+func TestStderrSummary(t *testing.T) {
+	tests := map[string]string{
+		"WARNING: a\nERROR: first\nERROR: second\n": "second",
+		"WARNING: only a warning\n":                 "WARNING: only a warning",
+		"":                                          "exited with status 2 and no error message",
+		"ERROR: " + strings.Repeat("x", 700):        strings.Repeat("x", 600) + "…",
+	}
+	for in, want := range tests {
+		if got := stderrSummary(in, 2); got != want {
+			t.Errorf("stderrSummary(%q) = %q, want %q", in, got, want)
+		}
+	}
+}

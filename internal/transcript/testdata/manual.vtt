@@ -1,0 +1,35 @@
+WEBVTT
+Kind: captions
+Language: en
+
+NOTE
+This note block must be ignored.
+
+STYLE
+::cue { color: yellow; }
+
+intro-1
+00:00:01.200 --> 00:00:03.600 line:85%
+[soft piano music]
+
+00:00:04.100 --> 00:00:07.300
+<v Host>Welcome back to the workshop.</v>
+Today we are building a <i>bookshelf</i>.
+
+00:00:07.400 --> 00:00:10.200 align:middle
+First, measure twice &amp; cut once.
+
+00:00:10.300 --> 00:00:12.400
+Keep the gap &lt; 2&nbsp;mm if you can.
+
+00:00:12.500 --> 00:00:14.300
+Sand it down.
+
+00:00:14.400 --> 00:00:16.200
+Sand it down.
+
+00:00:14.400 --> 00:00:16.200
+Sand it down.
+
+01:02:05.000 --> 01:02:07.500
+That's it for the long session — thanks for staying.

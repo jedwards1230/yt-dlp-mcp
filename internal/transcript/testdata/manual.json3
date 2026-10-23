@@ -1,0 +1,63 @@
+{
+  "wireMagic": "pb3",
+  "pens": [ {
+
+  } ],
+  "wsWinStyles": [ {
+
+  } ],
+  "wpWinPositions": [ {
+
+  } ],
+  "events": [ {
+    "tStartMs": 1200,
+    "dDurationMs": 2400,
+    "segs": [ {
+      "utf8": "[soft piano music]"
+    } ]
+  }, {
+    "tStartMs": 4100,
+    "dDurationMs": 3200,
+    "segs": [ {
+      "utf8": "Welcome back to the workshop.\nToday we are building a bookshelf."
+    } ]
+  }, {
+    "tStartMs": 7400,
+    "dDurationMs": 2800,
+    "segs": [ {
+      "utf8": "First, measure twice "
+    }, {
+      "utf8": "and cut once."
+    } ]
+  }, {
+    "tStartMs": 10300,
+    "dDurationMs": 2100,
+    "segs": [ {
+      "utf8": "Keep the gap < 2 mm if you can."
+    } ]
+  }, {
+    "tStartMs": 12500,
+    "dDurationMs": 1800,
+    "segs": [ {
+      "utf8": "Sand it down."
+    } ]
+  }, {
+    "tStartMs": 14400,
+    "dDurationMs": 1800,
+    "segs": [ {
+      "utf8": "Sand it down."
+    } ]
+  }, {
+    "tStartMs": 16300,
+    "dDurationMs": 400,
+    "segs": [ {
+      "utf8": "\n"
+    } ]
+  }, {
+    "tStartMs": 3725000,
+    "dDurationMs": 2500,
+    "segs": [ {
+      "utf8": "That's it for the long session — thanks for staying."
+    } ]
+  } ]
+}

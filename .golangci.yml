@@ -1,0 +1,30 @@
+version: "2"
+run:
+  go: "1.26"
+  # Lint the live smoke test (gated with //go:build live so the default
+  # `go test ./...` never touches the network) along with everything else.
+  build-tags:
+    - live
+linters:
+  enable:
+    - bodyclose
+    - errcheck
+    - errorlint
+    - gosec
+    - govet
+    - ineffassign
+    - misspell
+    - staticcheck
+    - unused
+  exclusions:
+    rules:
+      # Tests read and write their own testdata and temp files.
+      - path: _test\.go
+        linters:
+          - gosec
+# `golangci-lint run` reports any file gofmt would change (simplify on, as with
+# `gofmt -s`), so CI's Lint job enforces formatting. `golangci-lint fmt`
+# rewrites the files in place.
+formatters:
+  enable:
+    - gofmt

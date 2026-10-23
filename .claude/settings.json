@@ -5,89 +5,25 @@
       "Read",
       "Glob",
       "Grep",
-      "Bash(ls *)",
-      "Bash(cat *)",
+      "Bash(go build *)",
+      "Bash(go vet *)",
+      "Bash(go test *)",
+      "Bash(go mod tidy)",
+      "Bash(golangci-lint run *)",
+      "Bash(helm lint *)",
+      "Bash(helm template *)",
+      "Bash(actionlint *)",
+      "Bash(pre-commit run *)",
       "Bash(git log *)",
       "Bash(git status *)",
       "Bash(git diff *)",
       "Bash(git branch *)",
-      "Bash(jq *)",
-      "Bash(yq *)",
+      "Bash(ls *)",
+      "Bash(cat *)",
       "Bash(rg *)",
-      "Bash(find *)",
-      "Bash(tree *)",
-      "Bash(wc *)",
-      "Bash(sort *)",
-      "Bash(grep *)"
+      "Bash(jq *)",
+      "Bash(yq *)"
     ],
     "deny": []
-  },
-  "hooks": {
-    "SessionStart": [
-      {
-        "matcher": "",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "bash \"$CLAUDE_PROJECT_DIR/.claude/hooks/session-start.sh\""
-          }
-        ]
-      }
-    ],
-    "PreToolUse": [
-      {
-        "matcher": "",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "bash \"$CLAUDE_PROJECT_DIR/.claude/hooks/pre-tool-use.sh\""
-          }
-        ]
-      }
-    ],
-    "PostToolUse": [
-      {
-        "matcher": "",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "bash \"$CLAUDE_PROJECT_DIR/.claude/hooks/post-tool-use.sh\""
-          }
-        ]
-      }
-    ],
-    "Stop": [
-      {
-        "matcher": "",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "bash \"$CLAUDE_PROJECT_DIR/.claude/hooks/stop.sh\""
-          }
-        ]
-      }
-    ],
-    "SubagentStop": [
-      {
-        "matcher": "",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "bash \"$CLAUDE_PROJECT_DIR/.claude/hooks/subagent-stop.sh\""
-          }
-        ]
-      }
-    ],
-    "SessionEnd": [
-      {
-        "matcher": "",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "bash \"$CLAUDE_PROJECT_DIR/.claude/hooks/session-end.sh\""
-          }
-        ]
-      }
-    ]
   }
 }

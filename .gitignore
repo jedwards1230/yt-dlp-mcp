@@ -3,6 +3,9 @@ node_modules/
 vendor/
 
 # Build artifacts
+/yt-dlp-mcp
+/deploy/helm/*/charts/
+*.tgz
 dist/
 build/
 out/
@@ -21,8 +24,9 @@ bin/
 *.p12
 *.pfx
 
-# Claude Code local overrides (never commit — use settings.json for shared config)
+# Claude Code local overrides and worktrees (never commit)
 .claude/settings.local.json
+.claude/worktrees/
 
 # Editor and OS
 .DS_Store

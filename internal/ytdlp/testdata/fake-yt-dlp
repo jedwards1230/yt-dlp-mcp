@@ -1,0 +1,210 @@
+#!/bin/sh
+# fake-yt-dlp: a stand-in for yt-dlp in unit tests. It never touches the
+# network. It understands the subset of the CLI the server uses:
+#   --version                      print a version and exit
+#   -O TEMPLATE (repeatable)       print one fixture line per template, in order
+#   --write-subs / --write-auto-subs, --sub-langs, --sub-format, -P, -o
+#                                  copy a fixture subtitle file into -P
+#   -- TARGET                      ytsearchN:QUERY or a watch?v=<id> URL
+# Fixture data lives in videos/<id>/ next to this script. Special ids exercise
+# failure paths: fakeSlow000 (hangs), fakeOrphan0 (hangs with a child process),
+# fakeFlood00 (floods stdout), fakeError00 (exits 1 with an ERROR line),
+# fakeNoise00 (floods stderr, then exits 1 with an ERROR line), fakeCount00
+# (records how many fakeCount00 runs overlap, then answers as vidNoSubs00).
+# An id with no fixture directory behaves like a video YouTube cannot load
+# under --ignore-no-formats-error: extractor warnings on stderr, a placeholder
+# record with an empty fulltitle, and exit status 0. A fixture's optional
+# "stderr" file is copied to stderr.
+# The fakeChild ids leave a child process behind (its pid goes to
+# FAKE_YTDLP_PID_FILE), standing in for a JavaScript runtime that outlives
+# yt-dlp: fakeChildOk (child detached from stdio, answers as vidNoSubs00),
+# fakeChildEr (child detached from stdio, exits 1) and fakeChildPp (child
+# keeps the stdout/stderr pipes, exits 1).
+# If FAKE_YTDLP_ARGV_FILE is set, the argv is written there, one per line.
+set -eu
+
+here=$(cd "$(dirname "$0")" && pwd)
+videos="$here/videos"
+
+if [ "${FAKE_YTDLP_ARGV_FILE:-}" != "" ]; then
+	printf '%s\n' "$@" >"$FAKE_YTDLP_ARGV_FILE"
+fi
+if [ "${FAKE_YTDLP_ENV_FILE:-}" != "" ]; then
+	env >"$FAKE_YTDLP_ENV_FILE"
+fi
+
+templates=""
+nl='
+'
+write_subs=0
+write_auto=0
+sub_langs=""
+sub_format=""
+paths="."
+outtmpl=""
+target=""
+while [ $# -gt 0 ]; do
+	case "$1" in
+	--version) echo "2026.10.21-fake"; exit 0 ;;
+	-O | --print) templates="$templates$2$nl"; shift ;;
+	--write-subs) write_subs=1 ;;
+	--write-auto-subs) write_auto=1 ;;
+	--sub-langs) sub_langs=$2; shift ;;
+	--sub-format) sub_format=$2; shift ;;
+	-P | --paths) paths=$2; shift ;;
+	-o | --output) outtmpl=$2; shift ;;
+	--use-extractors | --color | --playlist-items | --extractor-args) shift ;;
+	--) target=${2:-}; break ;;
+	esac
+	shift
+done
+
+case "$target" in
+ytsearch*:*)
+	n=${target#ytsearch}
+	n=${n%%:*}
+	query=${target#*:}
+	if [ "$query" = "fake-error" ]; then
+		echo "ERROR: [youtube:search] search failed" >&2
+		exit 1
+	fi
+	head -n "$n" "$videos/search.jsonl"
+	exit 0
+	;;
+*"watch?v="*) id=${target##*v=} ;;
+*) id=custom ;;
+esac
+
+case "$id" in
+fakeSlow000) sleep 30; exit 0 ;;
+fakeOrphan0)
+	sleep 30 &
+	echo "$!" >"${FAKE_YTDLP_PID_FILE:?}"
+	sleep 30
+	exit 0
+	;;
+fakeFlood00) head -c 1048576 /dev/zero | tr '\0' 'x'; sleep 30; exit 0 ;;
+fakeError00)
+	echo "WARNING: [youtube] fakeError00: a harmless warning" >&2
+	echo "ERROR: [youtube] fakeError00: Video unavailable. This video is private" >&2
+	exit 1
+	;;
+fakeNoise00)
+	head -c 1048576 /dev/zero | tr '\0' 'w' >&2
+	echo >&2
+	echo "ERROR: [youtube] fakeNoise00: Sign in to confirm you are not a bot" >&2
+	exit 1
+	;;
+fakeCount00)
+	# Register in the shared directory, wait long enough for every run the
+	# server lets through to start, log how many are registered, deregister.
+	running=${FAKE_YTDLP_RUNNING_DIR:?}
+	: >"$running/$$"
+	sleep 0.5
+	ls "$running" | wc -l >>"${FAKE_YTDLP_COUNT_LOG:?}"
+	rm -f "$running/$$"
+	id=vidNoSubs00
+	;;
+fakeChildOk)
+	sleep 30 </dev/null >/dev/null 2>&1 &
+	echo "$!" >"${FAKE_YTDLP_PID_FILE:?}"
+	id=vidNoSubs00
+	;;
+fakeChildEr)
+	sleep 30 </dev/null >/dev/null 2>&1 &
+	echo "$!" >"${FAKE_YTDLP_PID_FILE:?}"
+	echo "ERROR: [youtube] fakeChildEr: Requested format is not available" >&2
+	exit 1
+	;;
+fakeChildPp)
+	sleep 30 &
+	echo "$!" >"${FAKE_YTDLP_PID_FILE:?}"
+	echo "ERROR: [youtube] fakeChildPp: Requested format is not available" >&2
+	exit 1
+	;;
+esac
+
+dir="$videos/$id"
+if [ ! -d "$dir" ]; then
+	echo "WARNING: [youtube] This video is unavailable" >&2
+	echo "WARNING: No video formats found!" >&2
+	echo "WARNING: Requested format is not available" >&2
+	printf '%s' "$templates" | while IFS= read -r t; do
+		case "$t" in
+		'%(.{'*) printf '{"id": "%s", "title": "youtube video #%s", "fulltitle": ""}\n' "$id" "$id" ;;
+		*) echo NA ;;
+		esac
+	done
+	exit 0
+fi
+if [ -f "$dir/stderr" ]; then
+	cat "$dir/stderr" >&2
+fi
+
+line() {
+	if [ -f "$dir/$1" ]; then cat "$dir/$1"; else echo "${2:-NA}"; fi
+}
+
+printf '%s' "$templates" | while IFS= read -r t; do
+	case "$t" in
+	'%(.{'*) line info.json ;;
+	'%(subtitles)l') line subtitles.keys ;;
+	'%(automatic_captions)l') line auto.keys ;;
+	'%(subtitles.:.0.{name,ext})j') line subtitles.names.json ;;
+	'%(automatic_captions.:.0.{name,ext})j') line auto.names.json ;;
+	*) echo NA ;;
+	esac
+done
+
+copy_sub() { # kind code: the first --sub-format match, else any format
+	old_ifs=$IFS
+	IFS=/
+	for ext in $sub_format; do
+		src="$dir/subs/$1.$2.$ext"
+		if [ -f "$src" ]; then
+			IFS=$old_ifs
+			cp "$src" "$paths/$outtmpl.$2.$ext"
+			return 0
+		fi
+	done
+	IFS=$old_ifs
+	for src in "$dir/subs/$1.$2."*; do
+		if [ -f "$src" ]; then
+			cp "$src" "$paths/$outtmpl.$2.${src##*.}"
+			return 0
+		fi
+	done
+	return 1
+}
+
+# --sub-langs is a comma-separated list; an element with a "[" is a pattern,
+# matched (whole, case-insensitively, like yt-dlp) against the fixture's
+# track codes. Per code, a manual track wins over an automatic one.
+codes=""
+old_ifs=$IFS
+IFS=,
+for el in $sub_langs; do
+	case "$el" in
+	*'['*)
+		for f in "$dir"/subs/*.*.*; do
+			[ -f "$f" ] || continue
+			c=${f#"$dir"/subs/*.}
+			c=${c%.*}
+			if printf '%s\n' "$c" | grep -Eiqx -- "$el"; then
+				codes="$codes $c"
+			fi
+		done
+		;;
+	*) codes="$codes $el" ;;
+	esac
+done
+IFS=$old_ifs
+for code in $codes; do
+	if [ "$write_subs" = 1 ] && copy_sub manual "$code"; then
+		continue
+	fi
+	if [ "$write_auto" = 1 ]; then
+		copy_sub auto "$code" || true
+	fi
+done
+exit 0

@@ -1,0 +1,22 @@
+# The image needs only go.mod/go.sum, cmd/, internal/ and requirements.txt.
+.git
+.github
+.devcontainer
+.claude
+.vscode
+.idea
+deploy
+docs
+test
+**/testdata
+*.md
+.golangci.yml
+.pre-commit-config.yaml
+.gitignore
+.dockerignore
+Dockerfile
+/yt-dlp-mcp
+*.out
+*.log
+.env
+.env.*

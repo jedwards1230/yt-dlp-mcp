@@ -1,4 +1,6 @@
-# .github/dependabot.yml — Dependabot version updates (per repo-standards Wave 3)
+# .github/dependabot.yml — Dependabot version updates.
+# Every label named below (dependency, chore) must already exist in the repo;
+# Dependabot silently drops labels it cannot apply.
 version: 2
 updates:
   - package-ecosystem: github-actions
@@ -13,8 +15,40 @@ updates:
     groups:
       actions:
         patterns: ["*"]
+
+  - package-ecosystem: gomod
+    directory: "/"
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 5
+    labels: ["dependency", "chore"]
+    commit-message:
+      prefix: "deps(gomod)"
+    groups:
+      gomod:
+        patterns: ["*"]
+
+  # requirements.txt pins yt-dlp and yt-dlp-ejs for the image. Checked daily:
+  # when a site changes, a yt-dlp release is what fixes the tools, and the
+  # pinned yt-dlp requires one exact yt-dlp-ejs, so the group bumps them
+  # together. requirements.txt is product, so the merged bump cuts a patch
+  # release (a new image) unless labelled semver:none.
+  - package-ecosystem: pip
+    directory: "/"
+    schedule:
+      interval: daily
+    open-pull-requests-limit: 5
+    labels: ["dependency", "chore"]
+    commit-message:
+      prefix: "deps(pip)"
+    groups:
+      pip:
+        patterns: ["*"]
+
+  # Dockerfile base images: golang builder, deno bin stage, python runtime.
   - package-ecosystem: docker
-    directory: "/.devcontainer"
+    directory: "/"
     schedule:
       interval: weekly
       day: monday
