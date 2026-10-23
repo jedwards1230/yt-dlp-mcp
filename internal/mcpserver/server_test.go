@@ -3,12 +3,14 @@ package mcpserver
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"math/rand/v2"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
 	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -396,7 +398,7 @@ func TestGetTranscriptErrors(t *testing.T) {
 }
 
 // TestNamedTracksEndToEnd drives a video whose manual tracks YouTube codes
-// "<lang>-<track id>" (en-eEY6OEpapPo) through a real client: every code
+// "{lang}-{track id}" (en-eEY6OEpapPo) through a real client: every code
 // list_subtitles lists, and the code its hint suggests, works as
 // get_transcript's lang, and the default call (lang en) returns the named
 // English manual track rather than automatic captions.
@@ -547,5 +549,70 @@ func TestDescriptionTruncation(t *testing.T) {
 	_, full, err := s.getInfo(t.Context(), nil, getInfoInput{URL: "dQw4w9WgXcQ", FullDescription: true})
 	if err != nil || full.DescriptionTruncated || len([]rune(full.Description)) != descriptionLimit+10 {
 		t.Fatalf("full description: %+v %v", full.DescriptionTruncated, err)
+	}
+}
+
+// htmlLike matches text some MCP gateways mistake for an HTML tag, such as
+// a "<lang>" placeholder.
+var htmlLike = regexp.MustCompile(`<[A-Za-z/!][^>]*>`)
+
+// collectDescriptions walks a JSON-encoded schema and returns every
+// "description" and "title" string, keyed by its JSON path.
+func collectDescriptions(path string, v any, out map[string]string) {
+	switch v := v.(type) {
+	case map[string]any:
+		for k, child := range v {
+			if s, ok := child.(string); ok && (k == "description" || k == "title") {
+				out[path+"."+k] = s
+				continue
+			}
+			collectDescriptions(path+"."+k, child, out)
+		}
+	case []any:
+		for i, child := range v {
+			collectDescriptions(fmt.Sprintf("%s[%d]", path, i), child, out)
+		}
+	}
+}
+
+// TestNoHTMLLikeText checks that nothing a client renders as prose — server
+// instructions, every registered tool's title and description, every input
+// and output schema description, and URL rejection messages — contains text
+// shaped like an HTML tag.
+func TestNoHTMLLikeText(t *testing.T) {
+	f := newFixture(t, "")
+	texts := map[string]string{"instructions": f.session.InitializeResult().Instructions}
+	tools := 0
+	for tool, err := range f.session.Tools(t.Context(), nil) {
+		if err != nil {
+			t.Fatal(err)
+		}
+		tools++
+		texts[tool.Name+".description"] = tool.Description
+		if tool.Annotations != nil {
+			texts[tool.Name+".annotations.title"] = tool.Annotations.Title
+		}
+		for kind, schema := range map[string]any{"inputSchema": tool.InputSchema, "outputSchema": tool.OutputSchema} {
+			raw, err := json.Marshal(schema)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var decoded any
+			if err := json.Unmarshal(raw, &decoded); err != nil {
+				t.Fatal(err)
+			}
+			collectDescriptions(tool.Name+"."+kind, decoded, texts)
+		}
+	}
+	if tools != 4 {
+		t.Fatalf("listed %d tools, want 4", tools)
+	}
+	for _, url := range []string{"", "https://www.youtube.com/playlist?list=PL12"} {
+		texts["get_info error for "+strconv.Quote(url)] = callErr(t, f, "get_info", map[string]any{"url": url})
+	}
+	for where, text := range texts {
+		if m := htmlLike.FindString(text); m != "" {
+			t.Errorf("%s contains HTML-like %q: %s", where, m, text)
+		}
 	}
 }

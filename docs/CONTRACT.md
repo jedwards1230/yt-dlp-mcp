@@ -104,6 +104,12 @@ before a handler runs. Pinned by `TestToolList`
 (`internal/mcpserver/server_test.go`). Failures follow §6. Optional output fields are
 omitted when the site does not report them.
 
+No text the server sends a client (the server instructions, tool titles and
+descriptions, input and output schema descriptions, and URL rejection messages)
+contains anything shaped like an HTML tag, since some MCP gateways reject HTML-like
+text in descriptions. Placeholders are written in braces, such as `{lang}-{track id}`.
+Pinned by `TestNoHTMLLikeText` (`internal/mcpserver/server_test.go`).
+
 ### §5.1 `search`
 
 | Input | Type | Default | Rules |
@@ -175,7 +181,7 @@ subtest of `TestLiveSmoke`.
 
 **Track choice.** For `lang`, in order: the manual track coded exactly `lang`; else
 the first named manual track in that language, which YouTube codes
-`<lang>-<track id>` (`en-eEY6OEpapPo` for `en`; the id has more than 8 characters, so a
+`{lang}-{track id}` (`en-eEY6OEpapPo` for `en`; the id has more than 8 characters, so a
 region or script code such as `en-GB`, `zh-Hant` or `es-419` never counts as one); else
 the automatic track `lang`. `source=manual` stops after the manual steps,
 `source=auto` takes only the automatic track. A named or region track can also be

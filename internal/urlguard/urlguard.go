@@ -136,7 +136,7 @@ type Target struct {
 func (a *Allowlist) Resolve(input string) (Target, error) {
 	s := strings.TrimSpace(input)
 	if s == "" {
-		return Target{}, rejectf("url is required: pass a video URL (e.g. https://www.youtube.com/watch?v=<id>) or an 11-character YouTube video id")
+		return Target{}, rejectf("url is required: pass a video URL (e.g. https://www.youtube.com/watch?v={id}) or an 11-character YouTube video id")
 	}
 	if len(s) > MaxURLLength {
 		return Target{}, rejectf("url is %d bytes long; the limit is %d", len(s), MaxURLLength)
@@ -197,7 +197,7 @@ func (a *Allowlist) Resolve(input string) (Target, error) {
 	if youtubeHosts[host] {
 		id, ok := youtubeVideoID(host, u)
 		if !ok {
-			return Target{}, rejectf("could not find a video id in %q; pass a single-video URL (https://www.youtube.com/watch?v=<id>, https://youtu.be/<id>, /shorts/<id>) or the bare 11-character id — playlists and channels are not supported", s)
+			return Target{}, rejectf("could not find a video id in %q; pass a single-video URL (https://www.youtube.com/watch?v={id}, https://youtu.be/{id}, /shorts/{id}) or the bare 11-character id — playlists and channels are not supported", s)
 		}
 		return a.youtubeTarget(id)
 	}

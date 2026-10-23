@@ -333,7 +333,7 @@ type getTranscriptOutput struct {
 	VideoID        string `json:"video_id"`
 	Title          string `json:"title"`
 	URL            string `json:"url"`
-	Lang           string `json:"lang" jsonschema:"code of the track actually used: the requested lang, or <lang>-<track id> when a named manual track in that language was chosen"`
+	Lang           string `json:"lang" jsonschema:"code of the track actually used: the requested lang, or {lang}-{track id} when a named manual track in that language was chosen"`
 	Source         string `json:"source" jsonschema:"manual or auto, the kind of track actually used"`
 	AutoTranslated bool   `json:"auto_translated,omitempty" jsonschema:"the automatic track is a machine translation, not the spoken language"`
 	Format         string `json:"format" jsonschema:"subtitle format converted: json3, vtt or srt"`
