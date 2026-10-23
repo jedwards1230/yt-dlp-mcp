@@ -10,8 +10,12 @@ import (
 	"time"
 )
 
-func env(m map[string]string) func(string) string {
-	return func(k string) string { return m[k] }
+// env is an os.LookupEnv over m: a key present in m is set, even to "".
+func env(m map[string]string) func(string) (string, bool) {
+	return func(k string) (string, bool) {
+		v, ok := m[k]
+		return v, ok
+	}
 }
 
 func TestDefaults(t *testing.T) {
@@ -82,6 +86,42 @@ func TestInvalid(t *testing.T) {
 			_, err := Load(tt.args, env(tt.env), io.Discard)
 			if err == nil || !strings.Contains(err.Error(), tt.want) {
 				t.Fatalf("err = %v, want containing %q", err, tt.want)
+			}
+		})
+	}
+}
+
+// TestAuthToken pins the difference between an unset token (no auth) and a set
+// but blank one (a startup error, so an empty Secret cannot turn auth off).
+func TestAuthToken(t *testing.T) {
+	tests := []struct {
+		name    string
+		env     map[string]string
+		want    string
+		wantErr bool
+	}{
+		{"unset", nil, "", false},
+		{"set empty", map[string]string{EnvAuthToken: ""}, "", true},
+		{"set whitespace", map[string]string{EnvAuthToken: " \t\n "}, "", true},
+		{"set valid, trimmed", map[string]string{EnvAuthToken: "  s3cret\n"}, "s3cret", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg, err := Load(nil, env(tt.env), io.Discard)
+			if tt.wantErr {
+				if err == nil {
+					t.Fatalf("Load succeeded with AuthToken %q, want an error", cfg.AuthToken)
+				}
+				if msg := err.Error(); !strings.Contains(msg, EnvAuthToken) || !strings.Contains(msg, "unset it") {
+					t.Fatalf("err = %v, want it to name %s and say to unset it", err, EnvAuthToken)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("Load: %v", err)
+			}
+			if cfg.AuthToken != tt.want {
+				t.Fatalf("AuthToken = %q, want %q", cfg.AuthToken, tt.want)
 			}
 		})
 	}

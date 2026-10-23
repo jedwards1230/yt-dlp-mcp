@@ -32,9 +32,11 @@ answers `404`.
   configured tokens are compared as SHA-256 digests in constant time, so neither timing
   nor a length mismatch reveals anything. Anything else answers `401` with
   `WWW-Authenticate: Bearer realm="yt-dlp-mcp", error="invalid_token"`, and the token is
-  never echoed. With no token, `/mcp` is open and the deployment must restrict who can
-  reach it. Enforced by `TestBearerAuth`, `TestValidBearer`, `TestNoAuthWhenTokenEmpty`,
-  `TestHealthz` (`internal/mcpserver/http_test.go`).
+  never echoed. With `YTDLP_MCP_AUTH_TOKEN` unset, `/mcp` is open and the deployment
+  must restrict who can reach it; set but blank stops startup (§3). Enforced by
+  `TestBearerAuth`, `TestValidBearer`, `TestNoAuthWhenTokenEmpty`, `TestHealthz`
+  (`internal/mcpserver/http_test.go`) and `TestAuthToken`
+  (`internal/config/config_test.go`).
 - **Disconnects.** For a client speaking MCP protocol `2026-07-28` or later, a tool
   call is canceled when its HTTP request ends, which kills its yt-dlp process. For an
   older client a disconnect does not cancel the call; it runs until yt-dlp finishes or
@@ -52,9 +54,9 @@ Environment variables, each overridable by a flag except the token. Precedence i
 then variable, then default; surrounding whitespace is trimmed. Any invalid value stops
 startup with every problem listed, as does an unknown flag or argument, and the server
 also refuses to start when the yt-dlp executable cannot be found. Enforced by
-`TestDefaults`, `TestEnvAndFlagPrecedence`, `TestInvalid`, `TestMultipleErrorsReported`,
-`TestHelp` (`internal/config/config_test.go`). What each variable is for, for operators:
-the README's Configuration section.
+`TestDefaults`, `TestEnvAndFlagPrecedence`, `TestInvalid`, `TestAuthToken`,
+`TestMultipleErrorsReported`, `TestHelp` (`internal/config/config_test.go`). What each
+variable is for, for operators: the README's Configuration section.
 
 | Variable | Flag | Default | Accepted |
 |---|---|---|---|
@@ -64,7 +66,7 @@ the README's Configuration section.
 | `YTDLP_MCP_TIMEOUT` | `-timeout` | `60s` | Go duration, `1s` to `10m`; bounds the whole call, slot wait included (§7) |
 | `YTDLP_MCP_MAX_OUTPUT_BYTES` | `-max-output-bytes` | `16777216` | whole bytes, `65536` to `268435456` |
 | `YTDLP_MCP_MAX_CONCURRENCY` | `-max-concurrency` | `4` | `1` to `64` |
-| `YTDLP_MCP_AUTH_TOKEN` | none: environment only | empty, meaning no auth | any string |
+| `YTDLP_MCP_AUTH_TOKEN` | none: environment only | unset, meaning no auth | any string that is not blank after trimming; set but blank (for example a Secret key holding an empty value) stops startup instead of turning auth off |
 | `YTDLP_MCP_LOG_LEVEL` | `-log-level` | `info` | `debug`, `info`, `warn`, `error`, in any case |
 | `YTDLP_MCP_CACHE_TTL` | `-cache-ttl` | `10m` | Go duration, `0` to `24h`; `0` disables the transcript cache (§5.4) |
 

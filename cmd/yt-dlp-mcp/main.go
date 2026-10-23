@@ -39,7 +39,7 @@ func main() {
 }
 
 func run() error {
-	cfg, err := config.Load(os.Args[1:], os.Getenv, os.Stderr)
+	cfg, err := config.Load(os.Args[1:], os.LookupEnv, os.Stderr)
 	if err != nil {
 		return err
 	}

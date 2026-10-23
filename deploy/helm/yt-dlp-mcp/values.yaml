@@ -40,10 +40,12 @@ config:
   # yt-dlp executable (YTDLP_MCP_YTDLP_PATH). Empty uses the one in the image.
   ytdlpPath: ""
 
-# Optional bearer token for /mcp (YTDLP_MCP_AUTH_TOKEN). Without one, /mcp is
-# open to anything that can reach the Service: put an authenticating gateway
-# in front, enable networkPolicy below, or both. /healthz is never
-# authenticated.
+# Optional bearer token for /mcp (YTDLP_MCP_AUTH_TOKEN). With neither token
+# nor existingSecret set the variable is not rendered and /mcp is open to
+# anything that can reach the Service: put an authenticating gateway in
+# front, enable networkPolicy below, or both. A Secret whose key holds an
+# empty or blank value does not turn auth off: the server refuses to start.
+# /healthz is never authenticated.
 auth:
   # Inline token; the chart stores it in a Secret. Prefer existingSecret.
   token: ""

@@ -110,7 +110,7 @@ every problem listed.
 | `YTDLP_MCP_TIMEOUT` | `60s` | Deadline for one tool call, including any wait for a free yt-dlp slot. Keep a gateway's timeout above it. |
 | `YTDLP_MCP_MAX_OUTPUT_BYTES` | `16777216` (16 MiB) | Cap on yt-dlp's stdout (a run that exceeds it is stopped) and on a subtitle file it writes (a larger one is refused). |
 | `YTDLP_MCP_MAX_CONCURRENCY` | `4` | yt-dlp processes allowed at once, shared by all tools. |
-| `YTDLP_MCP_AUTH_TOKEN` | empty (no auth) | Bearer token required on `/mcp`. Environment only, so it never appears in a process list. |
+| `YTDLP_MCP_AUTH_TOKEN` | unset (no auth) | Bearer token required on `/mcp`. Environment only, so it never appears in a process list. Set but blank stops the server at startup, so an empty Secret cannot turn auth off; unset it to run without auth. |
 | `YTDLP_MCP_LOG_LEVEL` | `info` | `debug`, `info`, `warn` or `error`. Logs are JSON on stderr; `debug` adds every yt-dlp command line. |
 | `YTDLP_MCP_CACHE_TTL` | `10m` | How long a fetched transcript is kept, so paging through it runs yt-dlp once. The cache holds at most 32 transcripts and about 64 MiB of text. `0` disables it. |
 
@@ -152,9 +152,10 @@ server treats it as untrusted machinery and fences it in:
 - **Optional bearer token.** With `YTDLP_MCP_AUTH_TOKEN` set, `/mcp` requires
   `Authorization: Bearer <token>` (the scheme in any case) and answers `401` otherwise;
   the token is compared as a SHA-256 digest in constant time. `/healthz` is always open
-  and reveals nothing. **With no token, anyone who can reach the port can use the
-  tools**, so the server must then sit behind something that decides who may: a loopback
-  bind, an MCP gateway that authenticates its callers, a NetworkPolicy, or a combination.
+  and reveals nothing. A set but blank value is a startup error, not "no auth". **With
+  the variable unset, anyone who can reach the port can use the tools**, so the server
+  must then sit behind something that decides who may: a loopback bind, an MCP gateway
+  that authenticates its callers, a NetworkPolicy, or a combination.
 
 ### Egress and the NetworkPolicy
 

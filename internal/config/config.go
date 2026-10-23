@@ -61,7 +61,9 @@ type Config struct {
 	Timeout        time.Duration
 	MaxOutputBytes int64
 	MaxConcurrency int
-	// AuthToken guards /mcp when non-empty. It is never logged.
+	// AuthToken guards /mcp when non-empty. It is empty only when
+	// YTDLP_MCP_AUTH_TOKEN is unset: a set but blank value fails Load. It is
+	// never logged.
 	AuthToken string
 	LogLevel  slog.Level
 	// CacheTTL is how long a fetched transcript is kept for pagination; 0
@@ -72,11 +74,13 @@ type Config struct {
 }
 
 // Load parses args (without the program name) over the environment read
-// through getenv. Usage and flag errors are written to stderr. A -h/-help
-// request returns flag.ErrHelp.
-func Load(args []string, getenv func(string) string, stderr io.Writer) (Config, error) {
+// through lookupEnv, which has the semantics of os.LookupEnv: it reports
+// whether a variable is set as well as its value. Usage and flag errors are
+// written to stderr. A -h/-help request returns flag.ErrHelp.
+func Load(args []string, lookupEnv func(string) (string, bool), stderr io.Writer) (Config, error) {
 	envOr := func(key, def string) string {
-		if v := strings.TrimSpace(getenv(key)); v != "" {
+		v, _ := lookupEnv(key)
+		if v = strings.TrimSpace(v); v != "" {
 			return v
 		}
 		return def
@@ -100,13 +104,19 @@ func Load(args []string, getenv func(string) string, stderr io.Writer) (Config, 
 		return Config{}, fmt.Errorf("unexpected arguments: %q", fs.Args())
 	}
 
+	token, tokenSet := lookupEnv(EnvAuthToken)
 	cfg := Config{
 		Addr:        strings.TrimSpace(*addr),
 		YTDLPPath:   strings.TrimSpace(*ytdlpPath),
-		AuthToken:   strings.TrimSpace(getenv(EnvAuthToken)),
+		AuthToken:   strings.TrimSpace(token),
 		ShowVersion: *showVersion,
 	}
 	var errs []error
+	// Unset means no auth. Set but blank is almost always a mistake, such as a
+	// Secret whose key is empty, and must not quietly turn auth off.
+	if tokenSet && cfg.AuthToken == "" {
+		errs = append(errs, fmt.Errorf("%s is set but blank; set a token, or unset it to serve /mcp without auth", EnvAuthToken))
+	}
 	if cfg.Addr == "" {
 		errs = append(errs, fmt.Errorf("%s must not be empty", EnvAddr))
 	}
