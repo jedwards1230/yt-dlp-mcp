@@ -152,7 +152,8 @@ which decides from the merged PR whether to release:
    Anything else releases as a patch: Go source, `go.mod`, `Dockerfile`,
    `requirements.txt`, the chart, and also `README.md` and `LICENSE`. Label a PR
    `semver:none` when it touches those but should not ship on its own. When the merged
-   PR, its labels or its file list cannot be read, the workflow falls back to a patch.
+   PR or its file list cannot be read, the workflow falls back to a patch. When its
+   labels cannot be read, the run fails and releases nothing: re-run it.
 3. Until the first `vX.Y.Z` tag exists, nothing is released without a label.
 
 A release tags `vX.Y.Z` with AI-generated notes, pushes the multi-arch image to

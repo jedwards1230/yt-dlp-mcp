@@ -4,7 +4,10 @@
 # (semver:none skips the release). With no label, the PR's changed files decide:
 # if EVERY file is dev-only (CI, editor/agent config, tests, docs; see
 # .github/.releaseignore) no release is cut, otherwise it is a patch. No
-# associated PR or an unreadable file list falls back to patch with a warning.
+# associated PR, an unreadable file list or an unevaluable .releaseignore
+# falls back to patch with a warning. Unreadable labels fail the run instead
+# (nothing is released; re-run it), since a semver:none label cannot be
+# honoured unread.
 # Until the first vX.Y.Z tag exists nothing is released without a label, so
 # the first version is always chosen (label the first release PR semver:minor
 # for v0.1.0) rather than defaulted to v0.0.1.
@@ -159,7 +162,9 @@ jobs:
             exit 0
           }
 
-          # Fallback (no PR / API failure): patch, the pre-existing behavior.
+          # Fallback (no PR, unreadable file list, .releaseignore error): patch.
+          # Each is reached only when there is no PR or its labels hold no
+          # semver label, so an explicit choice is never overridden.
           fallback() {
             [ "$HAS_RELEASE" = true ] || skip_unreleased "$1"
             echo "::warning::$1 -- falling back to a patch release"
@@ -172,8 +177,14 @@ jobs:
           }
           [ -n "$PR" ] || fallback "No merged PR found for ${GITHUB_SHA} (direct push?)"
 
-          LABELS=$(gh api "repos/${GH_REPO}/issues/${PR}" --jq '.labels[].name' 2>/dev/null) \
-            || fallback "Could not read labels for PR #${PR}"
+          # Unreadable labels fail closed: a semver:none label or a dev-only
+          # diff would go unconsulted, so falling back to a patch could cut a
+          # release nobody asked for. A red run is noticed, and a re-run reads
+          # the labels again.
+          if ! LABELS=$(gh api "repos/${GH_REPO}/issues/${PR}" --jq '.labels[].name' 2>/dev/null); then
+            echo "::error::Could not read labels for PR #${PR}; nothing was released. Re-run this workflow to read them again"
+            exit 1
+          fi
           echo "Labels for PR #${PR}: $(printf '%s\n' "${LABELS:-<none>}" | paste -sd, -)"
 
           FILES=""
