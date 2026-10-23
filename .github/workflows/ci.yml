@@ -83,12 +83,26 @@ jobs:
       - name: helm template (defaults)
         run: helm template yt-dlp-mcp deploy/helm/yt-dlp-mcp > /dev/null
 
+      # The egress carve-out is a default, not something a user must add:
+      # render the policy with no exceptCIDRs override and require all four
+      # ranges under the internet rule's except.
+      - name: helm template (network policy egress defaults)
+        run: |
+          set -euo pipefail
+          helm template yt-dlp-mcp deploy/helm/yt-dlp-mcp \
+            --set networkPolicy.enabled=true \
+            > netpol.yaml
+          except=$(yq 'select(.kind == "NetworkPolicy") | .spec.egress[].to[].ipBlock.except[]' netpol.yaml)
+          for cidr in 10.0.0.0/8 172.16.0.0/12 192.168.0.0/16 169.254.0.0/16; do
+            grep -qxF "$cidr" <<< "$except" \
+              || { echo "::error::the default NetworkPolicy egress does not except ${cidr}"; exit 1; }
+          done
+
       - name: helm template (network policy, auth, overrides)
         run: |
           helm template yt-dlp-mcp deploy/helm/yt-dlp-mcp \
             --set networkPolicy.enabled=true \
             --set 'networkPolicy.ingressFrom[0].namespaceSelector.matchLabels.team=agents' \
-            --set 'networkPolicy.egress.internet.exceptCIDRs={10.0.0.0/8,172.16.0.0/12,192.168.0.0/16,169.254.0.0/16}' \
             --set 'networkPolicy.egress.internet.ports[0].port=443' \
             --set 'networkPolicy.egress.internet.ports[0].protocol=TCP' \
             --set auth.existingSecret=yt-dlp-mcp-token \

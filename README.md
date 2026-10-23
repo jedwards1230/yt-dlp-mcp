@@ -163,10 +163,12 @@ The allowlist decides what a caller can point yt-dlp at, not every connection yt
 then makes: an extractor also talks to the site's API and media hosts, and yt-dlp follows
 HTTP redirects. For the default YouTube hosts that is YouTube's own infrastructure. A
 host you add is only as safe as wherever it can redirect to, so in Kubernetes enable the
-chart's NetworkPolicy and carve private ranges out of its egress rule. `exceptCIDRs` is
-the backstop that keeps a redirect away from your internal network and from cloud
-metadata endpoints. (With the generic extractor off, an added host also needs a
-dedicated yt-dlp extractor to work at all.)
+chart's NetworkPolicy. Its egress rule allows `0.0.0.0/0` minus
+`networkPolicy.egress.internet.exceptCIDRs`, which by default carves out the private
+ranges `10.0.0.0/8`, `172.16.0.0/12` and `192.168.0.0/16` and the link-local
+`169.254.0.0/16`: the backstop that keeps a redirect away from your internal network and
+from cloud metadata endpoints. (With the generic extractor off, an added host also needs
+a dedicated yt-dlp extractor to work at all.)
 
 The policy is off by default. A typical setup:
 
@@ -181,19 +183,17 @@ networkPolicy:
   egress:
     allowDNS: true          # UDP and TCP 53 to egress.dnsTo (default: kube-system/kube-dns)
     internet:
-      enabled: true         # 0.0.0.0/0 minus the ranges below
-      exceptCIDRs:
-        - 10.0.0.0/8
-        - 172.16.0.0/12
-        - 192.168.0.0/16
-        - 169.254.0.0/16
+      enabled: true         # 0.0.0.0/0 minus exceptCIDRs (default: the ranges above)
       ports:
         - port: 443
           protocol: TCP
 ```
 
-Add your cluster's pod and service ranges to `exceptCIDRs` if the private ranges above
-do not already cover them, and port 80 if an allowed host serves plain HTTP.
+Setting `exceptCIDRs` replaces the default list rather than adding to it (Helm replaces
+lists, it does not merge them), so a custom list must repeat the defaults it keeps, and
+`exceptCIDRs: []` removes the carve-out entirely. Add your cluster's pod and service
+ranges if the defaults do not already cover them, and port 80 if an allowed host serves
+plain HTTP.
 
 ## Documentation
 

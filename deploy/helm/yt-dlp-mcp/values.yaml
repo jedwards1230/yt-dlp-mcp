@@ -146,12 +146,18 @@ networkPolicy:
     internet:
       enabled: true
       # Ranges carved out of 0.0.0.0/0 so a redirect cannot reach private
-      # networks or cloud metadata. Example:
-      #   - 10.0.0.0/8
-      #   - 172.16.0.0/12
-      #   - 192.168.0.0/16
-      #   - 169.254.0.0/16
-      exceptCIDRs: []
+      # networks or cloud metadata. The default is the RFC 1918 private
+      # ranges plus link-local 169.254.0.0/16. Helm replaces a list rather
+      # than merging it, so a custom list must repeat every default it
+      # keeps, and `exceptCIDRs: []` removes the carve-out entirely. Add the
+      # cluster's pod and service ranges if they fall outside these. DNS is
+      # unaffected: the DNS rule above is a separate peer, and a pod may use
+      # any rule that matches.
+      exceptCIDRs:
+        - 10.0.0.0/8
+        - 172.16.0.0/12
+        - 192.168.0.0/16
+        - 169.254.0.0/16
       # NetworkPolicyPort list; empty allows every port. Example:
       #   - port: 443
       #     protocol: TCP

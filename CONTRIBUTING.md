@@ -8,7 +8,8 @@ changes go through the workflow below.
 
 - Go at the version in `go.mod` (currently `go 1.26.0`; CI installs it from `go.mod`)
 - [golangci-lint](https://golangci-lint.run/) v2 (CI pins v2.14.0)
-- [Helm](https://helm.sh/) 3.8 or newer, for the chart
+- [Helm](https://helm.sh/) 3.8 or newer, for the chart, and
+  [yq](https://github.com/mikefarah/yq) v4 for one of its CI checks
 - Docker with BuildKit, i.e. the `buildx` plugin, to build the image. The legacy builder
   cannot build this Dockerfile: it uses cache mounts and `$BUILDPLATFORM`.
 - [pre-commit](https://pre-commit.com/)
@@ -35,10 +36,15 @@ GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build -o /dev/null ./cmd/yt-dlp-mcp
 # Helm chart
 helm lint --strict deploy/helm/yt-dlp-mcp
 helm template yt-dlp-mcp deploy/helm/yt-dlp-mcp > /dev/null
+# with no exceptCIDRs override, the policy's egress must except all four default ranges
+except=$(helm template yt-dlp-mcp deploy/helm/yt-dlp-mcp --set networkPolicy.enabled=true \
+  | yq 'select(.kind == "NetworkPolicy") | .spec.egress[].to[].ipBlock.except[]')
+for cidr in 10.0.0.0/8 172.16.0.0/12 192.168.0.0/16 169.254.0.0/16; do
+  grep -qxF "$cidr" <<< "$except" || echo "default egress does not except ${cidr}"
+done
 helm template yt-dlp-mcp deploy/helm/yt-dlp-mcp \
   --set networkPolicy.enabled=true \
   --set 'networkPolicy.ingressFrom[0].namespaceSelector.matchLabels.team=agents' \
-  --set 'networkPolicy.egress.internet.exceptCIDRs={10.0.0.0/8,172.16.0.0/12,192.168.0.0/16,169.254.0.0/16}' \
   --set 'networkPolicy.egress.internet.ports[0].port=443' \
   --set 'networkPolicy.egress.internet.ports[0].protocol=TCP' \
   --set auth.existingSecret=yt-dlp-mcp-token \

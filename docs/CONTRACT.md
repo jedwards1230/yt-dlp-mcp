@@ -368,11 +368,13 @@ container port and the Service port are both named `http`, and the chart sets
 | `networkPolicy.enabled` (default `false`) | a NetworkPolicy with `policyTypes: [Ingress, Egress]` |
 | `networkPolicy.ingressFrom` | `from` peers for the `http` port; empty allows any source on that port |
 | `networkPolicy.egress.allowDNS`, `networkPolicy.egress.dnsTo` | UDP and TCP 53 to these peers (default `kube-system` pods labelled `k8s-app: kube-dns`) |
-| `networkPolicy.egress.internet.enabled`, `.exceptCIDRs`, `.ports` | an `ipBlock` of `0.0.0.0/0` minus `exceptCIDRs`; `ports: []` allows every port |
+| `networkPolicy.egress.internet.enabled`, `.exceptCIDRs`, `.ports` | an `ipBlock` of `0.0.0.0/0` minus `exceptCIDRs`, by default `10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16` and `169.254.0.0/16` (a set list replaces the default; `[]` removes the carve-out); `ports: []` allows every port. The DNS rule is a separate peer, so the carve-out never blocks DNS |
 | `extraManifests` | extra objects, rendered through `tpl` |
 
 Rendering with defaults, and with the policy, existing-secret auth and a host override
-enabled, is checked by the CI `Helm chart` job, and `helm lint --strict` must pass.
+enabled, is checked by the CI `Helm chart` job, which also requires the policy rendered
+with no `exceptCIDRs` override to except all four default ranges; `helm lint --strict`
+must pass.
 
 ## §11 Versioning
 
