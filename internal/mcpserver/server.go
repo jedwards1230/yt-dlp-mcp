@@ -111,7 +111,7 @@ func New(opts Options) *mcp.Server {
 	mcp.AddTool(srv, &mcp.Tool{
 		Name: "list_subtitles",
 		Description: "List a video's subtitle languages, split into manual (uploaded) tracks and automatic (speech-recognition) captions. " +
-			"The original-language automatic track is flagged original=true (YouTube codes it \"<lang>-orig\"); machine-translated automatic " +
+			"The original-language automatic track is flagged original=true (YouTube codes it {lang}-orig); machine-translated automatic " +
 			"tracks are only counted unless include_translations is true. Use a code from here as get_transcript's lang.",
 		Annotations: readOnly("List subtitles"),
 		InputSchema: inputSchema[listSubtitlesInput](nil, nil),
@@ -121,7 +121,7 @@ func New(opts Options) *mcp.Server {
 		Name: "get_transcript",
 		Description: "Fetch a video's subtitles as clean plain text: one caption line per output line, markup and inline timestamps stripped, " +
 			"automatic-caption rolling duplicates removed. Track choice for `lang`: the manual track coded exactly `lang`; else a named manual " +
-			"track in that language, which YouTube codes `<lang>-<track id>` (e.g. en-eEY6OEpapPo; a region code such as en-GB does not count); " +
+			"track in that language, which YouTube codes {lang}-{track id} (e.g. en-eEY6OEpapPo; a region code such as en-GB does not count); " +
 			"else the automatic captions in `lang`. `source` limits the choice to manual or automatic tracks, and the result's lang is the code " +
 			"actually used. Paginated by segment (caption line): check has_more and pass next_offset as offset " +
 			fmt.Sprintf("to continue. A page holds at most `limit` segments and at most %d bytes of text; a single longer line comes back alone.", maxPageBytes),
