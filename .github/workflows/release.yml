@@ -7,8 +7,13 @@
 # associated PR or an unreadable file list falls back to patch with a warning.
 # Until the first vX.Y.Z tag exists nothing is released without a label, so
 # the first version is always chosen (label the first release PR semver:minor
-# for v0.1.0) rather than defaulted to v0.0.1. workflow_dispatch always
-# releases (or previews, with dry_run).
+# for v0.1.0) rather than defaulted to v0.0.1.
+#
+# workflow_dispatch releases the chosen bump_type, or previews it with dry_run.
+# A real run must be dispatched from main and fails otherwise; a dry run may
+# come from any branch (e.g. to preview a change to this file). Before the
+# first vX.Y.Z tag a real bump_type=patch dispatch fails rather than cut
+# v0.0.1: pick minor for v0.1.0, or major (a dry run only warns).
 #
 # A release delegates version/tag/Chart.yaml-bump/AI-notes to the shared
 # jedwards1230/release-workflows ai-release.yml reusable (create_release:
@@ -89,8 +94,37 @@ jobs:
           INPUT_BUMP_TYPE: ${{ inputs.bump_type }}
           INPUT_DRY_RUN: ${{ inputs.dry_run }}
         run: |
-          # workflow_dispatch: use provided inputs
+          # A real dispatch tags and pushes :latest from the ref it runs on, so
+          # it must run on main. A dry run publishes nothing (every job after
+          # detect skips publishing on dry_run), so any branch may preview.
+          if [ "$EVENT_NAME" = "workflow_dispatch" ] && [ "$INPUT_DRY_RUN" != "true" ] \
+             && [ "$GITHUB_REF" != "refs/heads/main" ]; then
+            echo "::error::A real release must be dispatched from main, not ${GITHUB_REF}; nothing was released. Dispatch it from main, or tick dry_run to preview from this branch"
+            exit 1
+          fi
+
+          # Has a vX.Y.Z release been cut yet? Until one has, nothing releases
+          # without an explicit semver label, and a dispatch must choose the
+          # first version. If the tags cannot be listed, assume one exists (the
+          # rules below then apply unchanged).
+          HAS_RELEASE=true
+          if TAGS=$(gh api "repos/${GH_REPO}/git/matching-refs/tags/v" --paginate --jq '.[].ref' 2>/dev/null); then
+            printf '%s\n' "$TAGS" | grep -qE '^refs/tags/v[0-9]+\.[0-9]+\.[0-9]+$' || HAS_RELEASE=false
+          else
+            echo "::warning::Could not list tags; assuming a release already exists"
+          fi
+
+          # workflow_dispatch: use the provided inputs. The first version is a
+          # choice, so before any vX.Y.Z tag a patch (v0.0.1) is refused.
           if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+            if [ "$HAS_RELEASE" = false ] && [ "$INPUT_BUMP_TYPE" = patch ]; then
+              if [ "$INPUT_DRY_RUN" = "true" ]; then
+                echo "::warning::No vX.Y.Z release exists yet: a real run with bump_type=patch would be refused rather than cut v0.0.1. Pick minor for v0.1.0, or major"
+              else
+                echo "::error::No vX.Y.Z release exists yet, so bump_type=patch would cut v0.0.1; nothing was released. Re-run with bump_type=minor for v0.1.0, or major"
+                exit 1
+              fi
+            fi
             {
               echo "type=${INPUT_BUMP_TYPE}"
               echo "release=true"
@@ -115,16 +149,6 @@ jobs:
             echo "Attempt ${attempt}: no PR found for ${GITHUB_SHA}, retrying in 5s..."
             sleep 5
           done
-
-          # Has a vX.Y.Z release been cut yet? Until one has, nothing releases
-          # without an explicit semver label. If the tags cannot be listed,
-          # assume one exists (the rules below then apply unchanged).
-          HAS_RELEASE=true
-          if TAGS=$(gh api "repos/${GH_REPO}/git/matching-refs/tags/v" --paginate --jq '.[].ref' 2>/dev/null); then
-            printf '%s\n' "$TAGS" | grep -qE '^refs/tags/v[0-9]+\.[0-9]+\.[0-9]+$' || HAS_RELEASE=false
-          else
-            echo "::warning::Could not list tags; assuming a release already exists"
-          fi
           skip_unreleased() {
             echo "::notice::$1 -- no release exists yet, so nothing is released without a semver label (label the first release PR, e.g. semver:minor for v0.1.0)"
             {

@@ -161,7 +161,10 @@ to `oci://ghcr.io/jedwards1230/charts/yt-dlp-mcp`, and publishes the GitHub Rele
 chart's `version` and `appVersion` are rewritten on the tagged commit only; the values on
 `main` are not a published release. A maintainer can also run the workflow by hand
 (`workflow_dispatch`) with a bump type, or as a dry run that previews the version and
-notes without publishing.
+notes without publishing. A real run must be dispatched from `main`; a dry run may come
+from any branch, e.g. to preview a change to `release.yml`. Before the first `vX.Y.Z`
+tag, a real dispatch with bump type `patch` fails instead of cutting v0.0.1: choose
+`minor` for v0.1.0, or `major` (a dry run only warns).
 
 Dependabot bumps of `yt-dlp` and `yt-dlp-ejs` in `requirements.txt` are product changes
 and release a patch on merge. That is usually the point: a site change is fixed by a
