@@ -1,7 +1,7 @@
 # PR review — calls the shared reusable workflow in
-# jedwards1230/release-workflows, which runs claude-code-action@v1 in Haiku
-# PR-review mode with the public jedwards1230-plugins marketplace + review-team
-# plugin enabled by default. The focus below is appended to the base prompt.
+# jedwards1230/release-workflows (claude-code-action with the public
+# jedwards1230-plugins marketplace + review-team plugin). The focus below is
+# appended to the reusable's base prompt.
 name: PR Review
 
 on:
@@ -17,26 +17,54 @@ permissions:
 jobs:
   review:
     if: github.event.action != 'closed'
-    uses: jedwards1230/release-workflows/.github/workflows/claude-pr-review.yml@d9a5c9a683bdd1dfa6a8169252115e971f3053f4 # v1.10.1
+    uses: jedwards1230/release-workflows/.github/workflows/claude-pr-review.yml@b185a6e7822f9c36822ed8e89e77b3d0fe229f96 # v1.12.0
     secrets:
       CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }} # preferred (subscription)
       ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
       LITELLM_CI_KEY: ${{ secrets.LITELLM_CI_KEY }}
       LENS_TRACING_KEY: ${{ secrets.LENS_TRACING_KEY }}
+      TS_OAUTH_CLIENT_ID: ${{ secrets.TS_OAUTH_CLIENT_ID }}
+      TS_AUDIENCE: ${{ secrets.TS_AUDIENCE }}
+      LITELLM_CI_BASE_URL: ${{ secrets.LITELLM_CI_BASE_URL }}
+      LENS_CI_OTLP_ENDPOINT: ${{ secrets.LENS_CI_OTLP_ENDPOINT }}
     with:
+      extra_plugins: |
+        go-quality@jedwards1230-plugins
       focus: |
-        template-repo is a starter scaffold other repos are cloned from, so
-        review for patterns that would propagate badly:
-        - Insecure defaults, missing permissions scoping in shipped workflows,
-          unpinned/outdated action versions.
-        - Correctness of any scaffolded scripts, Dockerfile, or config.
-        Keep it exemplary — flag anything a copier would inherit as a mistake.
-        Do NOT re-flag formatting/lint that CI owns.
+        yt-dlp-mcp is a read-only Go MCP server that shells out to yt-dlp for
+        video search, metadata, subtitle listings and transcripts. Prioritize:
+        - SSRF / host allowlist (internal/urlguard): every URL-shaped tool input
+          must go through Allowlist.Resolve before any exec, and yt-dlp must get
+          the rebuilt URL, never the raw string. Look for parser differentials
+          (userinfo, IP literals incl. numeric shorthands, ports, trailing dots,
+          percent-encoded or non-ASCII hosts, backslashes) and new tools or
+          code paths that skip the guard.
+        - Exec safety (internal/ytdlp): argv only via exec.CommandContext, never
+          a shell; user-derived values only after the "--" marker (or in a
+          validated flag value such as --sub-langs, which is a regex list —
+          commas, "all" and metacharacters must stay rejected); BaseArgs keep
+          config/plugins/cookies/cache/remote components/generic extractor off;
+          the child environment stays an allowlist that cannot leak the auth
+          token.
+        - Resource bounds: per-call timeout, stdout/subtitle byte caps, the
+          concurrency semaphore, process-group kill (so deno children die), the
+          per-call scratch dir always removed, and no goroutine or process leak
+          on any error/cancel path.
+        - Transcript parsing correctness (internal/transcript): json3/VTT/SRT
+          edge cases, rolling auto-caption de-duplication, pagination math
+          (offset/limit/next_offset/has_more, the per-page byte budget).
+          Golden files under internal/transcript/testdata must change only with
+          an intended behavior change.
+        - Code↔chart↔docs drift: a new YTDLP_MCP_* env var, flag, port or tool
+          parameter must be exposed in deploy/helm/yt-dlp-mcp and documented in
+          docs/CONTRACT.md in the same PR.
+        - When the diff touches Go, prioritize the go-quality:go-reviewer agent.
+        Do NOT re-flag gofmt/go vet/golangci-lint findings — CI owns those.
 
   cancel-review:
     if: github.event.action == 'closed'
     permissions:
       actions: write
-    uses: jedwards1230/release-workflows/.github/workflows/claude-pr-review-cancel.yml@9a48fc8ec1985081e7337e4ae6669a2753f847ef # v1
+    uses: jedwards1230/release-workflows/.github/workflows/claude-pr-review-cancel.yml@b185a6e7822f9c36822ed8e89e77b3d0fe229f96 # v1.12.0
     with:
       review_workflow: ${{ github.workflow }}

@@ -1,41 +1,36 @@
-# Tag and create a GitHub Release via the shared
-# jedwards1230/release-workflows/.github/workflows/ai-release.yml@v1 workflow.
+# Release on push to main: publishes the container image and the Helm chart.
 #
-# Called by auto-release.yml on push to main (bump_type detected from PR
-# semver labels), or invoked directly via workflow_dispatch for manual
-# releases / dry-run previews.
+# Release rule for a merged PR: an explicit semver:major|minor|patch label wins
+# (semver:none skips the release). With no label, the PR's changed files decide:
+# if EVERY file is dev-only (CI, editor/agent config, tests, docs; see
+# .github/.releaseignore) no release is cut, otherwise it is a patch. No
+# associated PR or an unreadable file list falls back to patch with a warning.
+# Until the first vX.Y.Z tag exists nothing is released without a label, so
+# the first version is always chosen (label the first release PR semver:minor
+# for v0.1.0) rather than defaulted to v0.0.1. workflow_dispatch always
+# releases (or previews, with dry_run).
 #
-# template-repo has no Docker image or Helm chart, so create_release=true
-# instructs the shared workflow to publish the GitHub Release itself. Repos
-# cloned from this template that need to chain build/publish jobs between the
-# tag and the release should set create_release=false and create the release
-# in a downstream job using needs.prepare.outputs.release_body (base64).
-#
-# Template note: calls jedwards1230/release-workflows/.github/workflows/ai-release.yml@v1.
-# See that repo for docs. Copiers may fork release-workflows and update the
-# uses: path to their own fork.
+# A release delegates version/tag/Chart.yaml-bump/AI-notes to the shared
+# jedwards1230/release-workflows ai-release.yml reusable (create_release:
+# false), then builds and pushes the multi-arch image to GHCR, pushes the Helm
+# chart to oci://ghcr.io/<owner>/charts, and finally creates the GitHub Release
+# with install snippets prepended to the decoded AI body. Every job after
+# detect is gated on its `release` output.
 
 name: Release
 
 run-name: >-
-  Release: ${{ inputs.dry_run && 'dry-run ' || '' }}${{ inputs.bump_type }}
+  ${{
+    github.event_name == 'workflow_dispatch'
+      && format('Release: {0}{1}',
+           inputs.dry_run && 'dry-run ' || '',
+           inputs.bump_type)
+      || format('Release: {0}', github.event.head_commit.message || github.sha)
+  }}
 
 on:
-  workflow_call:
-    inputs:
-      bump_type:
-        description: "Version bump type (patch, minor, major)"
-        required: true
-        type: string
-      dry_run:
-        description: "Dry run — compute version and preview notes without tagging or publishing"
-        required: false
-        type: boolean
-        default: false
-    secrets:
-      ANTHROPIC_API_KEY:
-        description: "Anthropic API key for AI-generated release notes. Optional — workflow falls back to GitHub's native generate_release_notes when absent."
-        required: false
+  push:
+    branches: [main]
   workflow_dispatch:
     inputs:
       bump_type:
@@ -53,19 +48,368 @@ on:
         type: boolean
         default: false
 
-permissions:
-  contents: write
-  pull-requests: read
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+# Least privilege: nothing at the top level; each job asks for what it needs.
+permissions: {}
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+  CHART_DIR: deploy/helm/yt-dlp-mcp
 
 jobs:
+  detect:
+    name: Detect bump type
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: read # PR labels are read through the issues endpoint
+      pull-requests: read
+    outputs:
+      bump_type: ${{ steps.bump.outputs.type }}
+      release: ${{ steps.bump.outputs.release }}
+      dry_run: ${{ steps.bump.outputs.dry_run }}
+    steps:
+      - name: Fetch the dev-only list
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          sparse-checkout: .github/.releaseignore
+          sparse-checkout-cone-mode: false
+          persist-credentials: false
+
+      - name: Determine bump type
+        id: bump
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          EVENT_NAME: ${{ github.event_name }}
+          INPUT_BUMP_TYPE: ${{ inputs.bump_type }}
+          INPUT_DRY_RUN: ${{ inputs.dry_run }}
+        run: |
+          # workflow_dispatch: use provided inputs
+          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+            {
+              echo "type=${INPUT_BUMP_TYPE}"
+              echo "release=true"
+            } >> "$GITHUB_OUTPUT"
+            if [ "$INPUT_DRY_RUN" = "true" ]; then
+              echo "dry_run=true" >> "$GITHUB_OUTPUT"
+              echo "::notice::Dry run: previewing release with bump_type=${INPUT_BUMP_TYPE}"
+            else
+              echo "dry_run=false" >> "$GITHUB_OUTPUT"
+            fi
+            exit 0
+          fi
+
+          # push event: find the merged PR (retry -- the GitHub API may not have
+          # the merge commit indexed yet).
+          PR=""
+          for attempt in 1 2 3; do
+            PR=$(gh api "repos/${GH_REPO}/commits/${GITHUB_SHA}/pulls" 2>/dev/null \
+              | jq -r --arg sha "$GITHUB_SHA" \
+                '[.[] | select(.merge_commit_sha == $sha)][0].number // empty' 2>/dev/null || echo "")
+            [ -n "$PR" ] && break
+            echo "Attempt ${attempt}: no PR found for ${GITHUB_SHA}, retrying in 5s..."
+            sleep 5
+          done
+
+          # Has a vX.Y.Z release been cut yet? Until one has, nothing releases
+          # without an explicit semver label. If the tags cannot be listed,
+          # assume one exists (the rules below then apply unchanged).
+          HAS_RELEASE=true
+          if TAGS=$(gh api "repos/${GH_REPO}/git/matching-refs/tags/v" --paginate --jq '.[].ref' 2>/dev/null); then
+            printf '%s\n' "$TAGS" | grep -qE '^refs/tags/v[0-9]+\.[0-9]+\.[0-9]+$' || HAS_RELEASE=false
+          else
+            echo "::warning::Could not list tags; assuming a release already exists"
+          fi
+          skip_unreleased() {
+            echo "::notice::$1 -- no release exists yet, so nothing is released without a semver label (label the first release PR, e.g. semver:minor for v0.1.0)"
+            {
+              echo "type=patch"
+              echo "release=false"
+              echo "dry_run=false"
+            } >> "$GITHUB_OUTPUT"
+            exit 0
+          }
+
+          # Fallback (no PR / API failure): patch, the pre-existing behavior.
+          fallback() {
+            [ "$HAS_RELEASE" = true ] || skip_unreleased "$1"
+            echo "::warning::$1 -- falling back to a patch release"
+            {
+              echo "type=patch"
+              echo "release=true"
+              echo "dry_run=false"
+            } >> "$GITHUB_OUTPUT"
+            exit 0
+          }
+          [ -n "$PR" ] || fallback "No merged PR found for ${GITHUB_SHA} (direct push?)"
+
+          LABELS=$(gh api "repos/${GH_REPO}/issues/${PR}" --jq '.labels[].name' 2>/dev/null) \
+            || fallback "Could not read labels for PR #${PR}"
+          echo "Labels for PR #${PR}: $(printf '%s\n' "${LABELS:-<none>}" | paste -sd, -)"
+
+          FILES=""
+          if ! FILES=$(gh api "repos/${GH_REPO}/pulls/${PR}/files" --paginate \
+                --jq '.[] | .filename, (.previous_filename // empty)' 2>/dev/null) \
+             || [ -z "$FILES" ]; then
+            FILES=""
+          fi
+
+          # Classify the diff with git's own ignore engine. The dev-only list is
+          # .github/.releaseignore (gitignore syntax). A throwaway empty repo keeps
+          # every other excludes source (.gitignore, global) out of the match.
+          # Result: DEV_ONLY_DIFF=true when every changed file matches the list,
+          # FIRST_PRODUCT = first file that does not, CLASSIFY_ERR=1 on git error.
+          DEV_ONLY_DIFF=false
+          FIRST_PRODUCT=""
+          CLASSIFY_ERR=0
+          RELEASEIGNORE="${GITHUB_WORKSPACE}/.github/.releaseignore"
+          if [ ! -s "$RELEASEIGNORE" ]; then
+            echo "::notice::.github/.releaseignore is missing or empty -- nothing is dev-only"
+            FIRST_PRODUCT="${FILES%%$'\n'*}"
+          elif [ -n "$FILES" ]; then
+            # Every step is guarded: any failure here (mktemp, git, I/O) sets
+            # CLASSIFY_ERR=1 instead of aborting the job under errexit. A function
+            # run in an `if` context ignores errexit, hence the explicit `|| return 1`.
+            classify() {
+              local rc=0 SCRATCH
+              mapfile -t CHANGED < <(printf '%s\n' "$FILES" | sort -u) || return 1
+              [ "${#CHANGED[@]}" -gt 0 ] || return 1
+              SCRATCH=$(mktemp -d) || return 1
+              git init -q "$SCRATCH" || return 1
+              printf '%s\0' "${CHANGED[@]}" > "$SCRATCH.paths" || return 1
+              git -C "$SCRATCH" -c core.excludesFile="$RELEASEIGNORE" \
+                check-ignore --no-index -z --stdin < "$SCRATCH.paths" > "$SCRATCH.matched" || rc=$?
+              [ "$rc" -le 1 ] || return 1
+              mapfile -d '' MATCHED < "$SCRATCH.matched" || return 1
+              if [ "${#MATCHED[@]}" -eq "${#CHANGED[@]}" ]; then
+                DEV_ONLY_DIFF=true
+              else
+                FIRST_PRODUCT=$(comm -23 <(printf '%s\n' "${CHANGED[@]}") \
+                  <(printf '%s\n' "${MATCHED[@]}" | sort -u) | sed -n 1p) || return 1
+              fi
+            }
+            if ! classify; then
+              CLASSIFY_ERR=1
+              DEV_ONLY_DIFF=false
+              echo "::warning::Could not evaluate .github/.releaseignore for PR #${PR}"
+            fi
+          fi
+
+          # Rule 1: an explicit label always wins.
+          LABEL_TYPE=""
+          if echo "$LABELS" | grep -qx 'semver:major'; then LABEL_TYPE="major"
+          elif echo "$LABELS" | grep -qx 'semver:minor'; then LABEL_TYPE="minor"
+          elif echo "$LABELS" | grep -qx 'semver:patch'; then LABEL_TYPE="patch"
+          elif echo "$LABELS" | grep -qx 'semver:none'; then LABEL_TYPE="none"
+          fi
+
+          if [ -n "$LABEL_TYPE" ]; then
+            if [ "$LABEL_TYPE" = none ]; then
+              echo "::notice::semver:none label on PR #${PR} -- skipping release"
+              echo "type=patch" >> "$GITHUB_OUTPUT"
+              echo "release=false" >> "$GITHUB_OUTPUT"
+            else
+              if [ "$DEV_ONLY_DIFF" = true ]; then
+                echo "::warning::PR #${PR} carries semver:${LABEL_TYPE} but its diff is dev-only; semver:none (or no label) would skip the release"
+              fi
+              echo "type=${LABEL_TYPE}" >> "$GITHUB_OUTPUT"
+              echo "release=true" >> "$GITHUB_OUTPUT"
+            fi
+            echo "dry_run=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # Rule 2: no label -- decide from the changed files (once a release exists).
+          [ "$HAS_RELEASE" = true ] || skip_unreleased "PR #${PR} has no semver label"
+          [ -n "$FILES" ] || fallback "Could not list changed files for PR #${PR}"
+          [ "$CLASSIFY_ERR" = 0 ] || fallback "Could not evaluate .github/.releaseignore for PR #${PR}"
+          echo "type=patch" >> "$GITHUB_OUTPUT"
+          echo "dry_run=false" >> "$GITHUB_OUTPUT"
+          if [ "$DEV_ONLY_DIFF" = true ]; then
+            COUNT=$(printf '%s\n' "$FILES" | wc -l)
+            echo "::notice::Dev-only rule: all ${COUNT} changed file(s) in PR #${PR} are dev-only (e.g. $(printf '%s\n' "$FILES" | sed -n 1,3p | paste -sd, -)) -- skipping release"
+            echo "release=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "::notice::PR #${PR} releases as patch; first non-dev-only file: ${FIRST_PRODUCT}"
+            echo "release=true" >> "$GITHUB_OUTPUT"
+          fi
+
   prepare:
-    name: Tag & Release
-    uses: jedwards1230/release-workflows/.github/workflows/ai-release.yml@9a48fc8ec1985081e7337e4ae6669a2753f847ef # v1
+    name: Tag & Generate Notes
+    needs: [detect]
+    if: needs.detect.outputs.release == 'true'
+    permissions:
+      contents: write
+      pull-requests: read
+    uses: jedwards1230/release-workflows/.github/workflows/ai-release.yml@b185a6e7822f9c36822ed8e89e77b3d0fe229f96 # v1.12.0
     with:
-      service_name: template-repo
-      service_description: "a starter scaffold for new Claude Code-friendly repos"
-      bump_type: ${{ inputs.bump_type }}
-      dry_run: ${{ inputs.dry_run }}
-      create_release: true
+      service_name: yt-dlp-mcp
+      service_description: "a read-only MCP server for video search, metadata, subtitle listings and transcripts via yt-dlp"
+      bump_type: ${{ needs.detect.outputs.bump_type }}
+      chart_path: deploy/helm/yt-dlp-mcp/Chart.yaml
+      dry_run: ${{ needs.detect.outputs.dry_run == 'true' }}
+      create_release: false
     secrets:
       ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+
+  build:
+    name: Build and Push Image
+    needs: [detect, prepare]
+    if: needs.detect.outputs.release == 'true' && needs.detect.outputs.dry_run != 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.prepare.outputs.tag }}
+
+      # Only the pip/apt steps of the runtime stage run emulated; the Go
+      # builder stage cross-compiles natively.
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1 # v4.4.0
+        with:
+          platforms: arm64
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+
+      - name: Log in to Container Registry
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          push: true
+          platforms: linux/amd64,linux/arm64
+          build-args: |
+            BUILD_VERSION=${{ needs.prepare.outputs.version }}
+          tags: |
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ needs.prepare.outputs.version }}
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest
+          labels: |
+            org.opencontainers.image.version=${{ needs.prepare.outputs.version }}
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  helm:
+    name: Publish Helm Chart
+    needs: [detect, prepare]
+    if: needs.detect.outputs.release == 'true' && needs.detect.outputs.dry_run != 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.prepare.outputs.tag }}
+
+      - uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
+
+      - name: Log in to GHCR
+        env:
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GHCR_USER: ${{ github.actor }}
+        run: echo "$GHCR_TOKEN" | helm registry login ghcr.io -u "$GHCR_USER" --password-stdin
+
+      - name: Package and push
+        env:
+          REPO_OWNER: ${{ github.repository_owner }}
+        run: |
+          set -euo pipefail
+          helm package "$CHART_DIR"
+          helm push yt-dlp-mcp-*.tgz "oci://ghcr.io/${REPO_OWNER}/charts"
+
+      - name: Write summary
+        env:
+          REPO_OWNER: ${{ github.repository_owner }}
+        run: |
+          CHART_VERSION=$(grep '^version:' "$CHART_DIR/Chart.yaml" | awk '{print $2}')
+          {
+            echo "## Helm Chart Published"
+            echo ""
+            echo "| Field | Value |"
+            echo "|-------|-------|"
+            echo "| Chart Version | ${CHART_VERSION} |"
+            echo "| Registry | \`oci://ghcr.io/${REPO_OWNER}/charts/yt-dlp-mcp\` |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  release:
+    name: Create GitHub Release
+    needs: [detect, prepare, build, helm]
+    if: needs.detect.outputs.release == 'true' && needs.detect.outputs.dry_run != 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Compose release body (install snippets + AI notes)
+        env:
+          BODY_B64: ${{ needs.prepare.outputs.release_body }}
+          VERSION: ${{ needs.prepare.outputs.version }}
+          REPO_OWNER: ${{ github.repository_owner }}
+        run: |
+          set -euo pipefail
+
+          # ai-release.yml emits a base64-encoded body; decode before use.
+          echo "$BODY_B64" | base64 -d > /tmp/ai_body.md
+
+          # Prepend install snippets so consumers see "how do I get this?"
+          # before the AI summary + commit list.
+          {
+            echo "## Install"
+            echo ""
+            echo "### Docker"
+            echo ""
+            echo '```bash'
+            echo "docker run --rm --read-only --tmpfs /tmp -p 127.0.0.1:8080:8080 ${REGISTRY}/${IMAGE_NAME}:${VERSION}"
+            echo '```'
+            echo ""
+            echo "### Helm"
+            echo ""
+            echo '```bash'
+            echo "helm install yt-dlp-mcp oci://ghcr.io/${REPO_OWNER}/charts/yt-dlp-mcp --version ${VERSION}"
+            echo '```'
+            echo ""
+            echo "---"
+            echo ""
+          } > /tmp/release_body.md
+          cat /tmp/ai_body.md >> /tmp/release_body.md
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3
+        with:
+          tag_name: ${{ needs.prepare.outputs.tag }}
+          name: Release ${{ needs.prepare.outputs.version }}
+          body_path: /tmp/release_body.md
+          make_latest: true
+
+      - name: Write workflow summary
+        env:
+          TAG: ${{ needs.prepare.outputs.tag }}
+          VERSION: ${{ needs.prepare.outputs.version }}
+          BUMP_TYPE: ${{ needs.detect.outputs.bump_type }}
+          REPO_OWNER: ${{ github.repository_owner }}
+        run: |
+          {
+            echo "## Release ${TAG}"
+            echo ""
+            echo "| Field | Value |"
+            echo "|-------|-------|"
+            echo "| Version | ${VERSION} |"
+            echo "| Image | \`${REGISTRY}/${IMAGE_NAME}:${VERSION}\` |"
+            echo "| Chart | \`oci://ghcr.io/${REPO_OWNER}/charts/yt-dlp-mcp:${VERSION}\` |"
+            echo "| Bump | ${BUMP_TYPE} |"
+          } >> "$GITHUB_STEP_SUMMARY"
