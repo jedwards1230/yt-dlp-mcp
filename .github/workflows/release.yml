@@ -281,7 +281,7 @@ jobs:
     permissions:
       contents: write
       pull-requests: read
-    uses: jedwards1230/release-workflows/.github/workflows/ai-release.yml@b185a6e7822f9c36822ed8e89e77b3d0fe229f96 # v1.12.0
+    uses: jedwards1230/release-workflows/.github/workflows/ai-release.yml@9f6e82e1035f04e19bce5c78bbd750edac3b6ff5 # v1.13.2
     with:
       service_name: yt-dlp-mcp
       service_description: "a read-only MCP server for video search, metadata, subtitle listings and transcripts via yt-dlp"
@@ -316,7 +316,7 @@ jobs:
         uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
 
       - name: Log in to Container Registry
-        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
         with:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
