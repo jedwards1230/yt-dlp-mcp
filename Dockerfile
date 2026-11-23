@@ -3,7 +3,7 @@
 # --- Go builder ---
 # Runs natively on the build host and cross-compiles to $TARGETARCH, so a
 # multi-arch build never runs the compiler under QEMU emulation.
-FROM --platform=$BUILDPLATFORM golang:1.27.3-alpine AS go-builder
+FROM --platform=$BUILDPLATFORM golang:1.27.4-alpine AS go-builder
 WORKDIR /src
 
 ARG TARGETOS
@@ -31,7 +31,7 @@ RUN --mount=type=cache,target=/go/pkg/mod \
 FROM denoland/deno:bin-2.9.8 AS deno
 
 # --- Runtime ---
-FROM python:3.14.9-slim-trixie
+FROM python:3.15.2-slim-trixie
 
 # tini runs as PID 1 and reaps orphans: when a call times out the whole
 # yt-dlp process group is killed, and a JavaScript runtime it spawned would
